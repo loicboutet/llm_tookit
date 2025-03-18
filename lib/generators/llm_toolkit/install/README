@@ -1,0 +1,24 @@
+===============================================================================
+
+LlmToolkit has been installed. Next steps:
+
+1. Run the migrations:
+   $ bin/rails llm_toolkit:install:migrations
+   $ bin/rails db:migrate
+
+2. Review the generated initializer at config/initializers/llm_toolkit.rb
+   and customize it for your application's needs.
+
+3. Include the Conversable concern in any models that should support conversations:
+   
+   class Project < ApplicationRecord
+     include LlmToolkit::Conversable
+     
+     def generate_system_messages(role = :coder)
+       # Define custom system messages here
+     end
+   end
+
+4. Create custom tools if needed in app/services/llm_toolkit/tools/
+
+===============================================================================
