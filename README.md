@@ -28,22 +28,23 @@ $ rails db:migrate
 
 ## Configuration
 
-Configure LlmToolkit in an initializer:
+Configure LlmToolkit in an initializer that will be created during installation:
 
 ```ruby
 # config/initializers/llm_toolkit.rb
 LlmToolkit.configure do |config|
   # Tools that require user confirmation before execution
-  config.dangerous_tools = ['write_to_file', 'execute_command']
+  # These tools will be marked as pending and won't execute until approved
+  config.dangerous_tools = []
   
-  # Default model for Anthropic (Claude)
-  config.default_anthropic_model = "claude-3-opus-20240229"
+  # Default model for Anthropic Claude
+  config.default_anthropic_model = "claude-3-sonnet-20240229"
   
-  # Default max tokens for responses
+  # Default maximum tokens for LLM responses
   config.default_max_tokens = 4096
   
-  # Referer URL for OpenRouter
-  config.referer_url = "https://your-app-domain.com"
+  # Referer URL for OpenRouter API requests
+  config.referer_url = "http://localhost:3000"
 end
 ```
 
