@@ -5,13 +5,13 @@ module LlmToolkit
     has_many :messages, class_name: 'LlmToolkit::Message', dependent: :destroy
     has_many :tool_uses, through: :messages, class_name: 'LlmToolkit::ToolUse'
 
-    # Fix enum definition to be compatible with Rails 8.0.1
-    enum :agent_type, {
-      planner: 0,
-      coder: 1,
-      reviewer: 2,
-      tester: 3
-    }
+    # # Fix enum definition to be compatible with Rails 8.0.1
+    # enum :agent_type, {
+    #   planner: 0,
+    #   coder: 1,
+    #   reviewer: 2,
+    #   tester: 3
+    # }
 
     # Use string enum format for status
     enum :status, {
@@ -189,13 +189,17 @@ module LlmToolkit
 
         # Add the function result if present
         if tool_result = tool_use.tool_result
+          # Ensure is_error is a boolean - this fixes the API error
+          is_error_value = tool_result.is_error.nil? ? false : !!tool_result.is_error
+          
           messages << {
             role: "user",
             content: [{
               type: "tool_result",
               tool_use_id: tool_use.tool_use_id,
               content: tool_result.content,
-              is_error: tool_result.is_error}]
+              is_error: is_error_value  # Always send a boolean value
+            }]
           }
         end
       end
