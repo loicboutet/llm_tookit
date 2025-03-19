@@ -1,9 +1,10 @@
 ===============================================================================
 
-LlmToolkit has been installed. Next steps:
+LlmToolkit has been installed!
+
+Next steps:
 
 1. Run the migrations:
-   $ bin/rails llm_toolkit:install:migrations
    $ bin/rails db:migrate
 
 2. Review the generated initializer at config/initializers/llm_toolkit.rb
@@ -14,11 +15,38 @@ LlmToolkit has been installed. Next steps:
    class Project < ApplicationRecord
      include LlmToolkit::Conversable
      
-     def generate_system_messages(role = :coder)
-       # Define custom system messages here
+     # Optionally set default tools for all instances of this model
+     default_tools LlmToolkit::Tools::SearchTool, LlmToolkit::Tools::GetUrl
+     
+     # Optionally define a method to generate system messages
+     def generate_system_prompt(role = nil)
+       ["You are an AI assistant helping with projects."]
      end
    end
 
-4. Create custom tools if needed in app/services/llm_toolkit/tools/
+4. Create LLM Provider records to store your API keys:
+
+   # For a user-owned provider
+   user.llm_providers.create!(
+     name: "My Claude",
+     provider_type: "anthropic",
+     api_key: "sk-ant-your-api-key-here"
+   )
+
+   # For an application-wide provider
+   LlmToolkit::LlmProvider.create!(
+     name: "App Default",
+     provider_type: "anthropic",
+     api_key: "sk-ant-your-api-key-here",
+     owner: YourAppModel.first # Some global owner model
+   )
+
+5. Start chatting with your models:
+
+   project = Project.find(1)
+   response = project.chat("Can you help me plan this project?")
+
+For more information, check the documentation at:
+https://github.com/loicboutet/llm_tookit
 
 ===============================================================================

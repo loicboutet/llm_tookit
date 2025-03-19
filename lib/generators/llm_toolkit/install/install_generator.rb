@@ -7,6 +7,10 @@ module LlmToolkit
         template "initializer.rb", "config/initializers/llm_toolkit.rb"
       end
       
+      def copy_migrations
+        rake "llm_toolkit:install:migrations"
+      end
+      
       def show_readme
         readme "README" if behavior == :invoke
       end

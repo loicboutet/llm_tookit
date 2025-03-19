@@ -22,13 +22,27 @@ Then execute:
 
 ```bash
 $ bundle install
+```
+
+Run the generator to install the engine into your application:
+
+```bash
 $ rails generate llm_toolkit:install
+```
+
+This will:
+1. Create an initializer at `config/initializers/llm_toolkit.rb`
+2. Copy all required migrations from the engine to your application
+
+Finally, run the migrations:
+
+```bash
 $ rails db:migrate
 ```
 
 ## Configuration
 
-Configure LlmToolkit in an initializer that will be created during installation:
+Configure LlmToolkit in the initializer that was created during installation:
 
 ```ruby
 # config/initializers/llm_toolkit.rb

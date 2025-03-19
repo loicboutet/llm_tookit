@@ -2,6 +2,11 @@ module LlmToolkit
   class Engine < ::Rails::Engine
     isolate_namespace LlmToolkit
 
+    # Enable Rails engine to copy migrations from this engine to the host application
+    config.paths["db/migrate"].expanded.each do |expanded_path|
+      Rails.application.config.paths["db/migrate"] << expanded_path
+    end
+
     initializer 'llm_toolkit.assets.precompile' do |app|
       app.config.assets.precompile += %w( llm_toolkit/application.css )
     end
