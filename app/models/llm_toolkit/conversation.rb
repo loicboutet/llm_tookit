@@ -5,8 +5,11 @@ module LlmToolkit
     has_many :messages, class_name: 'LlmToolkit::Message', dependent: :destroy
     has_many :tool_uses, through: :messages, class_name: 'LlmToolkit::ToolUse'
 
-    # Explicitly declare the enum with the attribute type
-    # agent_type is an integer column in the database
+    # Explicitly declare the attribute type for the enum
+    attribute :agent_type, :integer
+    attribute :status, :string
+
+    # Now define the enums
     enum :agent_type, {
       planner: 0,
       coder: 1,
@@ -14,8 +17,6 @@ module LlmToolkit
       tester: 3
     }, prefix: true
 
-    # Explicitly declare the enum with the attribute type
-    # status is a string column in the database
     enum :status, {
       resting: "resting",
       working: "working",

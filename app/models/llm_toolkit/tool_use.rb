@@ -3,7 +3,9 @@ module LlmToolkit
     belongs_to :message, class_name: 'LlmToolkit::Message'
     has_one :tool_result, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
     
-    enum :status, { pending: 0, approved: 1, rejected: 2, waiting: 3 }
+    # Explicitly declare the attribute type
+    attribute :status, :integer
+    enum :status, { pending: 0, approved: 1, rejected: 2, waiting: 3 }, prefix: true
       
     after_create :touch_conversation
     after_update :touch_conversation
@@ -14,11 +16,11 @@ module LlmToolkit
     end
 
     def completed?
-      status != :pending && status != :waiting
+      !status_pending? && !status_waiting?
     end
     
     def file_content
-      if name == 'write_to_file' && approved?
+      if name == 'write_to_file' && status_approved?
         File.read(input['path'])
       end
     rescue Errno::ENOENT
@@ -31,7 +33,7 @@ module LlmToolkit
         content: rejection_message,
         is_error: false
       )
-      rejected!
+      status_rejected!
     end
     
     private
