@@ -27,7 +27,7 @@ module LlmToolkit
     # Default LLM provider implementation - can be overridden by classes
     # @return [LlmToolkit::LlmProvider] The default LLM provider to use
     def default_llm_provider
-      provider_method = self.class.default_llm_provider_method || :default_llm_provider
+      provider_method = self.class.get_default_llm_provider_method || :default_llm_provider
       
       if provider_method != :default_llm_provider && respond_to?(provider_method)
         send(provider_method)
@@ -42,7 +42,7 @@ module LlmToolkit
     # @param role [Symbol, nil] Optional role for different prompts
     # @return [Array<Hash>] Array of system messages
     def generate_system_messages(role = nil)
-      prompt_method = self.class.default_system_prompt_method || :generate_system_messages
+      prompt_method = self.class.get_default_system_prompt_method || :generate_system_messages
       
       if prompt_method != :generate_system_messages && respond_to?(prompt_method)
         send(prompt_method, role)
@@ -53,7 +53,7 @@ module LlmToolkit
     
     class_methods do
       # Get default LLM provider method
-      def default_llm_provider_method
+      def get_default_llm_provider_method
         @default_llm_provider_method
       end
       
@@ -64,12 +64,6 @@ module LlmToolkit
       end
       
       # Get default tools
-      def default_tools
-        @default_tools || []
-      end
-      
-      # Set default tools
-      # @param tool_classes [Array<Class>] The tool classes to use by default
       def default_tools(*tool_classes)
         if tool_classes.empty?
           @default_tools || []
@@ -79,7 +73,7 @@ module LlmToolkit
       end
       
       # Get default system prompt method
-      def default_system_prompt_method
+      def get_default_system_prompt_method
         @default_system_prompt_method
       end
       

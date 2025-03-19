@@ -139,8 +139,8 @@ module LlmToolkit
     
     # Get the default provider from the conversable
     def get_default_provider
-      if conversable.respond_to?(conversable.class.default_llm_provider_method)
-        conversable.send(conversable.class.default_llm_provider_method)
+      if conversable.respond_to?(conversable.class.get_default_llm_provider_method)
+        conversable.send(conversable.class.get_default_llm_provider_method)
       else
         conversable.default_llm_provider
       end
