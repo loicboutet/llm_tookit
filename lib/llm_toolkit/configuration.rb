@@ -7,8 +7,8 @@ module LlmToolkit
 
     def initialize
       @dangerous_tools = []
-      @default_anthropic_model = "claude-3-sonnet-20240229"
-      @default_max_tokens = 4096
+      @default_anthropic_model = "claude-3-7-sonnet-20250219"
+      @default_max_tokens = 8192
       @referer_url = "http://localhost:3000"
     end
   end

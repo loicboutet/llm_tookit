@@ -188,7 +188,7 @@ The LlmToolkit can be configured at three levels:
    ```ruby
    LlmToolkit.configure do |config|
      config.dangerous_tools = ['write_to_file']
-     config.default_anthropic_model = "claude-3-opus-20240229"
+     config.default_anthropic_model = "claude-3-7-sonnet-20250219"
    end
    ```
 

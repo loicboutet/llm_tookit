@@ -38,10 +38,10 @@ LlmToolkit.configure do |config|
   config.dangerous_tools = []
   
   # Default model for Anthropic Claude
-  config.default_anthropic_model = "claude-3-sonnet-20240229"
+  config.default_anthropic_model = "claude-3-7-sonnet-20250219"
   
   # Default maximum tokens for LLM responses
-  config.default_max_tokens = 4096
+  config.default_max_tokens = 8192
   
   # Referer URL for OpenRouter API requests
   config.referer_url = "http://localhost:3000"

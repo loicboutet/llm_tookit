@@ -1,6 +1,6 @@
 module LlmToolkit
   class CallLlmWithToolService
-    attr_reader :llm_provider, :conversation, :conversable, :role, :tools, :user_id
+    attr_reader :llm_provider, :conversation, :conversable, :role, :tools, :user_id, :tool_classes
 
     # Initialize the service with necessary parameters
     #
@@ -33,37 +33,51 @@ module LlmToolkit
       return false unless @llm_provider
 
       begin
-        # Call the LLM
+        # Set conversation to working status
+        @conversation.update(status: :working)
+        
+        # Start the LLM interaction loop
         response = call_llm
-
-        # Handle the response
-        return false unless response
-
-        # Create a message with the response content
-        message = create_message(response['content'])
-
-        # Check for cancellation
-        return false if should_cancel?
-
-        # Process tool usage if there are tools
-        if response['tool_calls'].present?
-          tool_calls_detected = process_tool_uses(response, message)
-
-          # Set conversation to waiting status if dangerous tools were encountered
-          return true
-        end
-
-        # Set conversation status to resting when done
-        @conversation.update(status: :resting)
+        process_response(response)
+        
         true
       rescue => e
         Rails.logger.error("Error in CallLlmWithToolService: #{e.message}")
         Rails.logger.error(e.backtrace.join("\n"))
         false
+      ensure
+        # Set conversation status to resting when done, unless waiting for approval
+        @conversation.update(status: :resting) unless @conversation.waiting?
       end
     end
 
     private
+
+    # Process the LLM response and execute any tool calls
+    #
+    # @param response [Hash] The response from the LLM
+    def process_response(response)
+      return unless response
+      
+      # Create an assistant message with the response content
+      message = create_message(response['content'])
+      
+      # Process tool calls in a loop until done or waiting for approval
+      while response['tool_calls'].present?
+        # Process tool uses and check if dangerous tools were encountered
+        dangerous_tool_encountered = process_tool_uses(response, message)
+        
+        # If dangerous tools were encountered, break the loop and wait for approval
+        break if dangerous_tool_encountered
+        
+        # Otherwise, call the LLM again with the updated conversation history
+        response = call_llm
+        break unless response
+        
+        # Create a new message with the response content
+        message = create_message(response['content'])
+      end
+    end
 
     # Call the LLM and get a response
     #
@@ -177,17 +191,6 @@ module LlmToolkit
       )
 
       true
-    end
-
-    # Check if the LLM call should be cancelled
-    #
-    # @return [Boolean] Whether to cancel the call
-    def should_cancel?
-      if @conversable.respond_to?(:canceled?) && @conversable.canceled?
-        @conversation.update(status: :resting)
-        return true
-      end
-      false
     end
   end
 end

@@ -7,7 +7,15 @@ module LlmToolkit
     after_update :touch_conversation
     after_destroy :touch_conversation
     
+    # Ensure is_error is always a boolean
+    before_save :ensure_is_error_boolean
+    
     private
+    
+    def ensure_is_error_boolean
+      # Convert nil to false, and ensure any other value is explicitly a boolean
+      self.is_error = self.is_error.nil? ? false : !!self.is_error
+    end
     
     def touch_conversation
       message.conversation.touch
