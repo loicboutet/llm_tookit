@@ -8,7 +8,7 @@ module LlmToolkit
       end
       
       def copy_migrations
-        rake "llm_toolkit:install:migrations"
+        rake "llm_toolkit:install_migrations"
       end
       
       def show_readme
