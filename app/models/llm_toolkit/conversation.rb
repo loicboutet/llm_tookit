@@ -5,20 +5,22 @@ module LlmToolkit
     has_many :messages, class_name: 'LlmToolkit::Message', dependent: :destroy
     has_many :tool_uses, through: :messages, class_name: 'LlmToolkit::ToolUse'
 
-    # # Fix enum definition to be compatible with Rails 8.0.1
-    # enum :agent_type, {
-    #   planner: 0,
-    #   coder: 1,
-    #   reviewer: 2,
-    #   tester: 3
-    # }
+    # Explicitly declare the enum with the attribute type
+    # agent_type is an integer column in the database
+    enum :agent_type, {
+      planner: 0,
+      coder: 1,
+      reviewer: 2,
+      tester: 3
+    }, prefix: true
 
-    # Use string enum format for status
+    # Explicitly declare the enum with the attribute type
+    # status is a string column in the database
     enum :status, {
       resting: "resting",
       working: "working",
       waiting: "waiting"
-    }
+    }, prefix: true
 
     validates :agent_type, presence: true
     validates :status, presence: true
@@ -74,11 +76,11 @@ module LlmToolkit
     end
 
     def can_send_message?
-      resting? || canceled?
+      status_resting? || canceled?
     end
 
     def can_retry?
-      resting? && messages.last&.is_error?
+      status_resting? && messages.last&.is_error?
     end
 
     # Returns an array of messages formatted for LLM providers
