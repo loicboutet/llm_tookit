@@ -23,7 +23,8 @@ module LlmToolkit
             Rails.logger.info "GetUrl: Content truncated from #{content.length} to #{truncated_content.length} characters"
           end
           
-          { result: truncated_content }
+          # Convert result to properly formatted JSON string to ensure it's formatted correctly for OpenRouter
+          { result: "Title: #{url}\n\n#{truncated_content}" }
         rescue => e
           Rails.logger.error "GetUrl: Error fetching URL: #{e.message}"
           Rails.logger.error "GetUrl: #{e.backtrace.join("\n")}" if e.backtrace

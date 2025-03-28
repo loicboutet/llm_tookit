@@ -44,32 +44,47 @@ module LlmToolkit
             parsed_results = JSON.parse(results)
             
             if parsed_results.is_a?(Hash) && parsed_results['data'].is_a?(Array)
-              # Format search results for better readability
-              formatted_results = parsed_results['data'].map do |item|
-                {
-                  title: item['title'],
-                  url: item['url'],
-                  description: item['description'],
-                  content: item['content']&.truncate(500)
-                }
+              # Format search results as a clean string for better compatibility with OpenRouter
+              formatted_text = "SEARCH RESULTS FOR: #{query}\n\n"
+              
+              parsed_results['data'].each_with_index do |item, index|
+                formatted_text += "---\n"
+                formatted_text += "RESULT #{index + 1}:\n"
+                formatted_text += "Title: #{item['title']}\n"
+                formatted_text += "URL: #{item['url']}\n"
+                
+                if item['description'].present?
+                  formatted_text += "Description: #{item['description']}\n"
+                end
+                
+                if item['content'].present?
+                  # Truncate content to keep result size manageable
+                  content_preview = item['content'].to_s.truncate(500)
+                  formatted_text += "Content Preview: #{content_preview}\n"
+                end
+                
+                formatted_text += "\n"
               end
               
-              Rails.logger.info "SearchWeb: Found #{formatted_results.size} results"
-              return { result: formatted_results }
+              Rails.logger.info "SearchWeb: Found #{parsed_results['data'].size} results"
+              return { result: formatted_text }
             else
-              Rails.logger.warn "SearchWeb: Unexpected response format: #{parsed_results.class}"
+              # For non-standard responses, create a plain text representation
+              formatted_text = "SEARCH RESULTS FOR: #{query}\n\n"
+              formatted_text += "Raw Results: #{parsed_results.inspect.truncate(5000)}"
+              return { result: formatted_text }
             end
           rescue JSON::ParserError => e
             Rails.logger.error "SearchWeb: JSON parsing error: #{e.message}"
             Rails.logger.error "SearchWeb: Response was: #{results.truncate(500)}"
+            
+            # Return a simpler plain text for OpenRouter
+            return { result: "Error parsing search results. Raw response:\n\n#{results.truncate(5000)}" }
           end
-          
-          # If parsing fails or format is unexpected, return raw results (truncated)
-          { result: results.truncate(10000) }
         rescue => e
           Rails.logger.error "SearchWeb: Error performing search: #{e.message}"
           Rails.logger.error "SearchWeb: #{e.backtrace.join("\n")}" if e.backtrace
-          { error: "Error performing web search: #{e.message}" }
+          return { error: "Error performing web search: #{e.message}" }
         end
       end
     end

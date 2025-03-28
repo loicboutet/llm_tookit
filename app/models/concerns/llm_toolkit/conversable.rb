@@ -11,17 +11,36 @@ module LlmToolkit
     # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @param new_conversation [Boolean] Whether to create a new conversation or use existing
-    # @return [LlmToolkit::Message] The assistant's response message
-    def chat(message, provider: nil, tools: nil, new_conversation: false)
-      # Get the conversation - create new or find last one
-      conversation = if new_conversation
-                       conversations.create!(agent_type: :planner) # Use a valid agent_type
-                     else
-                       conversations.last || conversations.create!(agent_type: :planner)
-                     end
+    # @param conversation [LlmToolkit::Conversation, nil] An optional specific conversation to use
+    # @param async [Boolean] Whether to process the request asynchronously
+    # @return [LlmToolkit::Message, Boolean] The assistant's response message or true if async
+    def chat(message, provider: nil, tools: nil, new_conversation: false, conversation: nil, async: false)
+      # Use the provided conversation if available
+      chat_conversation = if conversation
+                           conversation
+                         elsif new_conversation
+                           conversations.create!(agent_type: :planner)
+                         else
+                           conversations.last || conversations.create!(agent_type: :planner)
+                         end
       
-      # Forward to the conversation's chat method
-      conversation.chat(message, provider: provider, tools: tools || self.class.default_tools)
+      # Forward to the conversation's chat method with async parameter
+      if async
+        chat_conversation.chat_async(message, provider: provider, tools: tools || self.class.default_tools)
+      else
+        chat_conversation.chat(message, provider: provider, tools: tools || self.class.default_tools)
+      end
+    end
+    
+    # Asynchronous chat interface
+    # @param message [String] The message to send to the LLM
+    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param tools [Array<Class>, nil] Optional tools to use for this interaction 
+    # @param new_conversation [Boolean] Whether to create a new conversation or use existing
+    # @param conversation [LlmToolkit::Conversation, nil] An optional specific conversation to use
+    # @return [Boolean] Success status of job queueing
+    def chat_async(message, provider: nil, tools: nil, new_conversation: false, conversation: nil)
+      chat(message, provider: provider, tools: tools, new_conversation: new_conversation, conversation: conversation, async: true)
     end
     
     # Default LLM provider implementation - can be overridden by classes

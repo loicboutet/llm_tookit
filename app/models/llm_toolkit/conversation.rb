@@ -5,6 +5,8 @@ module LlmToolkit
     has_many :messages, class_name: 'LlmToolkit::Message', dependent: :destroy
     has_many :tool_uses, through: :messages, class_name: 'LlmToolkit::ToolUse'
 
+    broadcasts_refreshes
+
     # Explicitly declare the attribute type for the enum
     attribute :agent_type, :integer
     attribute :status, :string
@@ -35,8 +37,9 @@ module LlmToolkit
     # @param message [String] The message to send to the LLM
     # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
-    # @return [LlmToolkit::Message] The assistant's response message
-    def chat(message, provider: nil, tools: nil)
+    # @param async [Boolean] Whether to process the request asynchronously
+    # @return [LlmToolkit::Message] The assistant's response message or nil if async
+    def chat(message, provider: nil, tools: nil, async: false)
       # Set conversation status to working
       update(status: :working)
       
@@ -53,19 +56,42 @@ module LlmToolkit
         user_id: Thread.current[:current_user_id]
       )
       
-      # Call LLM service
-      service = LlmToolkit::CallLlmWithToolService.new(
-        llm_provider: llm_provider,
-        conversation: self,
-        tool_classes: tool_classes,
-        user_id: Thread.current[:current_user_id]
-      )
-      
-      # Process the response
-      result = service.call
-      
-      # Return the last assistant message
-      messages.where(role: 'assistant').order(created_at: :desc).first if result
+      if async
+        # Run in background job
+        LlmToolkit::CallLlmJob.perform_later(
+          id, 
+          llm_provider.id, 
+          tool_classes.map(&:name),
+          self.agent_type,
+          Thread.current[:current_user_id]
+        )
+        
+        # Return true to indicate the job was queued
+        return true
+      else
+        # Call LLM service synchronously
+        service = LlmToolkit::CallLlmWithToolService.new(
+          llm_provider: llm_provider,
+          conversation: self,
+          tool_classes: tool_classes,
+          user_id: Thread.current[:current_user_id]
+        )
+        
+        # Process the response
+        result = service.call
+        
+        # Return the last assistant message
+        messages.where(role: 'assistant').order(created_at: :desc).first if result
+      end
+    end
+
+    # Asynchronous chat interface
+    # @param message [String] The message to send to the LLM
+    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param tools [Array<Class>, nil] Optional tools to use for this interaction
+    # @return [Boolean] Success status of job queueing
+    def chat_async(message, provider: nil, tools: nil)
+      chat(message, provider: provider, tools: tools, async: true)
     end
 
     def working?
@@ -127,7 +153,11 @@ module LlmToolkit
         end
       end
 
-      add_cache_control(history_messages)
+      # Only add cache control headers for Anthropic
+      if provider_type == "anthropic"
+        add_cache_control(history_messages)
+      end
+      
       if provider_type == "anthropic"
         return history_messages.reject { |msg| msg[:content].nil? || (msg[:content].is_a?(Array) && msg[:content].empty?) } 
       else
@@ -217,15 +247,30 @@ module LlmToolkit
       }]
 
       tool_uses.each do |tool_use|
+        # Generate a valid tool ID if one doesn't exist
+        tool_id = tool_use.tool_use_id.presence || "tool_#{SecureRandom.hex(4)}_#{tool_use.name}"
+        
+        # Ensure input is properly JSON serialized
+        tool_arguments = begin
+          if tool_use.input.is_a?(Hash)
+            tool_use.input.to_json
+          else
+            JSON.generate({})
+          end
+        rescue => e
+          Rails.logger.error("Error serializing tool arguments: #{e.message}")
+          "{}"
+        end
+        
         # Add the function call
-        if message_content[:content] == nil 
+        if message_content[:content].nil?
           messages.first[:tool_calls] ||= []
           messages.first[:tool_calls] << {
-            id: tool_use.tool_use_id,
+            id: tool_id,
             type: "function",
             function: {
               name: tool_use.name,
-              arguments: tool_use.input.to_json
+              arguments: tool_arguments
             }
           }
         else 
@@ -233,11 +278,11 @@ module LlmToolkit
             role: "assistant",
             content: nil,
             tool_calls: [{
-              id: tool_use.tool_use_id,
+              id: tool_id,
               type: "function",
               function: {
                 name: tool_use.name,
-                arguments: tool_use.input.to_json
+                arguments: tool_arguments
               }
             }]
           }
@@ -245,14 +290,30 @@ module LlmToolkit
 
         # Add the function result if present
         if tool_result = tool_use.tool_result
+          # Format the content properly for OpenRouter
+          tool_result_content = tool_result.content.to_s
+          
+          # Clean up any Ruby object notation
+          if tool_result_content.include?('=>')
+            Rails.logger.warn("Ruby hash notation detected in tool result, cleaning up")
+            # Try to extract actual content from Ruby object notation
+            if tool_result_content =~ /:result\s*=>\s*"(.*?)"/
+              tool_result_content = $1
+            end
+          end
+          
+          # Add the tool result message
           messages << {
             role: "tool",
-            tool_call_id: tool_use.tool_use_id,
+            tool_call_id: tool_id,
             name: tool_use.name,
-            content: tool_result.content ? tool_result.content : "Error"
+            content: tool_result_content
           }
         end
       end
+      
+      # Log the formatted messages for debugging
+      Rails.logger.debug("Formatted OpenRouter messages: #{messages.inspect}")
       
       messages
     end

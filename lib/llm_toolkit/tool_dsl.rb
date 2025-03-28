@@ -1,10 +1,7 @@
 module LlmToolkit
-  class ToolDSL < LlmToolkit::Tools::AbstractTool
-    include LlmToolkit::CancellationCheck
-    
+  # Base class for all tools using the DSL
+  class ToolDSL
     class << self
-      include LlmToolkit::CancellationCheck
-      
       # Store descriptions for each class
       def descriptions
         @descriptions ||= {}
@@ -33,8 +30,8 @@ module LlmToolkit
       
       # Track inheritance to make sure tools are properly registered
       def inherited(subclass)
-        super # This will call AbstractTool's inherited method
-        Rails.logger.info "Registered tool: #{subclass.name}"
+        super
+        Rails.logger.info "Registered tool: #{subclass.name}" if defined?(Rails)
       end
       
       # Convert our DSL to the schema expected by LLMs
@@ -48,11 +45,11 @@ module LlmToolkit
             required: build_required_params
           }
         }
-        Rails.logger.debug "Tool definition for #{self.name}: #{result.inspect}"
+        Rails.logger.debug "Tool definition for #{self.name}: #{result.inspect}" if defined?(Rails)
         result
       end
       
-      # Implementation for the AbstractTool interface
+      # Implementation for the tool interface
       def execute(conversable:, args:, tool_use: nil)
         # Create instance
         instance = new
@@ -71,8 +68,8 @@ module LlmToolkit
         # Return the result
         result.is_a?(Hash) ? result : { result: result.to_s }
       rescue => e
-        Rails.logger.error "Error executing #{self.name}: #{e.message}"
-        Rails.logger.error e.backtrace.join("\n") if e.backtrace
+        Rails.logger.error "Error executing #{self.name}: #{e.message}" if defined?(Rails)
+        Rails.logger.error e.backtrace.join("\n") if defined?(Rails) && e.backtrace
         { error: "Error executing #{self.name}: #{e.message}" }
       end
       

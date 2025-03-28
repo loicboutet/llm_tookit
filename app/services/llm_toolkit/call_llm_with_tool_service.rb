@@ -59,11 +59,27 @@ module LlmToolkit
     def process_response(response)
       return unless response
       
+      # Log the response for debugging
+      Rails.logger.debug("Processing LLM response: #{response.inspect}")
+      
+      # For tool calls, the content may be empty, so we should handle that gracefully
+      content = response['content']
+      
       # Create an assistant message with the response content
-      message = create_message(response['content'])
+      # Only create if content is not empty
+      message = if content.present?
+                  create_message(content)
+                else
+                  # For tool calls with null content, we'll get the message from the first tool use
+                  # This handles the OpenRouter responses where content is null but tool_calls is present
+                  nil
+                end
       
       # Process tool calls in a loop until done or waiting for approval
       while response['tool_calls'].present?
+        # We need a message to attach tool uses to
+        message ||= create_message("")
+        
         # Process tool uses and check if dangerous tools were encountered
         dangerous_tool_encountered = process_tool_uses(response, message)
         
@@ -74,8 +90,13 @@ module LlmToolkit
         response = call_llm
         break unless response
         
-        # Create a new message with the response content
-        message = create_message(response['content'])
+        # Reset message for the next iteration
+        message = nil
+        
+        # Create a new message with the response content if present
+        if response['content'].present?
+          message = create_message(response['content'])
+        end
       end
     end
 
@@ -123,9 +144,17 @@ module LlmToolkit
       tool_calls.each do |tool_use|
         next unless tool_use.is_a?(Hash)
 
+        # Log tool use for debugging
+        Rails.logger.debug("Processing tool use: #{tool_use.inspect}")
+
         name = tool_use['name'] || 'unknown_tool'
         input = tool_use['input'] || {}
         id = tool_use['id'] || SecureRandom.uuid
+
+        # Log the extracted data
+        Rails.logger.debug("Tool name: #{name}")
+        Rails.logger.debug("Tool input: #{input.inspect}")
+        Rails.logger.debug("Tool ID: #{id}")
 
         saved_tool_use = message.tool_uses.create!(
           name: name,

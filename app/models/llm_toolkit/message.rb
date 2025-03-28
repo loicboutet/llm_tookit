@@ -5,7 +5,7 @@ module LlmToolkit
     has_many :tool_results, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
     
     validates :role, presence: true
-
+    
     # Support for ActiveStorage if it's available and properly set up
     if defined?(ActiveStorage) && ActiveRecord::Base.connection.table_exists?('active_storage_attachments')
       has_many_attached :images
