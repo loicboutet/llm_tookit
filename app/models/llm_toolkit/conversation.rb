@@ -85,6 +85,63 @@ module LlmToolkit
       end
     end
 
+    # Streaming chat interface - send message and get streamed response
+    # @param message [String] The message to send to the LLM
+    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param tools [Array<Class>, nil] Optional tools to use for this interaction
+    # @param broadcast_to [String, nil] Optional channel to broadcast chunks to
+    # @param async [Boolean] Whether to process the request asynchronously
+    # @return [LlmToolkit::Message, Boolean] The assistant's response message or true if async
+    def stream_chat(message, provider: nil, tools: nil, broadcast_to: nil, async: true)
+      # Validation - currently stream_chat only works with openrouter provider
+      llm_provider = provider || get_default_provider
+      unless llm_provider.provider_type == 'openrouter'
+        raise ArgumentError, "stream_chat only works with OpenRouter providers"
+      end
+      
+      # Set conversation status to working
+      update(status: :working)
+      
+      # Get the tools
+      tool_classes = tools || get_default_tools
+      
+      # Add user message
+      user_message = messages.create!(
+        role: 'user',
+        content: message,
+        user_id: Thread.current[:current_user_id]
+      )
+      
+      if async
+        # Run in background job with optional broadcast channel
+        LlmToolkit::CallStreamingLlmJob.perform_later(
+          id, 
+          llm_provider.id, 
+          tool_classes.map(&:name),
+          self.agent_type,
+          Thread.current[:current_user_id],
+          broadcast_to
+        )
+        
+        # Return true to indicate the job was queued
+        return true
+      else
+        # Call streaming LLM service synchronously
+        service = LlmToolkit::CallStreamingLlmWithToolService.new(
+          llm_provider: llm_provider,
+          conversation: self,
+          tool_classes: tool_classes,
+          user_id: Thread.current[:current_user_id]
+        )
+        
+        # Process the response without a callback (synchronous operation)
+        result = service.call
+        
+        # Return the last assistant message
+        messages.where(role: 'assistant').order(created_at: :desc).first if result
+      end
+    end
+
     # Asynchronous chat interface
     # @param message [String] The message to send to the LLM
     # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
@@ -92,6 +149,16 @@ module LlmToolkit
     # @return [Boolean] Success status of job queueing
     def chat_async(message, provider: nil, tools: nil)
       chat(message, provider: provider, tools: tools, async: true)
+    end
+    
+    # Asynchronous streaming chat interface
+    # @param message [String] The message to send to the LLM
+    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param tools [Array<Class>, nil] Optional tools to use for this interaction
+    # @param broadcast_to [String, nil] Optional channel to broadcast chunks to
+    # @return [Boolean] Success status of job queueing
+    def stream_chat_async(message, provider: nil, tools: nil, broadcast_to: nil)
+      stream_chat(message, provider: provider, tools: tools, broadcast_to: broadcast_to, async: true)
     end
 
     def working?

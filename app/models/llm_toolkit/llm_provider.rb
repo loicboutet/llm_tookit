@@ -36,6 +36,36 @@ module LlmToolkit
         raise ApiError, "Unsupported provider type: #{provider_type}"
       end
     end
+    
+    # Stream chat implementation for OpenRouter
+    # Accepts a block that will be called with each chunk of the streamed response
+    def stream_chat(system_messages, conversation_history, tools = nil, &block)
+      # Validate provider type - currently only supporting OpenRouter
+      unless provider_type == 'openrouter'
+        raise ApiError, "Streaming is only supported for OpenRouter provider"
+      end
+      
+      # Ensure we have valid arrays
+      system_messages = Array(system_messages)
+      conversation_history = Array(conversation_history)
+      tools = Array(tools)
+      
+      # Validate tools format
+      tools.each do |tool|
+        unless tool.is_a?(Hash) && tool[:name].present? && tool[:description].present?
+          Rails.logger.warn "Invalid tool format detected: #{tool.inspect}"
+          
+          # Provide a default description if missing
+          if tool[:name].present? && tool[:description].nil?
+            tool[:description] = "Tool for #{tool[:name]}"
+            Rails.logger.info "Added default description for tool: #{tool[:name]}"
+          end
+        end
+      end
+      
+      # Stream response from OpenRouter
+      stream_openrouter(system_messages, conversation_history, tools, &block)
+    end
 
     private
 
@@ -118,7 +148,7 @@ module LlmToolkit
         { role: 'system', content: system_message_content }
       ] + Array(conversation_history)
 
-      model = settings&.dig('model') || 'anthropic/claude-3-sonnet'
+      model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
 
       request_body = {
@@ -161,6 +191,167 @@ module LlmToolkit
     rescue Faraday::Error => e
       Rails.logger.error("OpenRouter API error: #{e.message}")
       raise ApiError, "Network error: #{e.message}"
+    end
+    
+    def stream_openrouter(system_messages, conversation_history, tools = nil, &block)
+      # Setup client with read_timeout increased for streaming
+      client = Faraday.new(url: 'https://openrouter.ai/api/v1') do |f|
+        f.request :json
+        # Don't use f.response :json as we need the raw response for streaming
+        f.adapter Faraday.default_adapter
+        f.options.timeout = 600 # Longer timeout for streaming
+        f.options.open_timeout = 10
+      end
+
+      # Ensure system_messages is properly formatted and not nil
+      system_message_content = if system_messages.present?
+                                 system_messages.map { |msg| msg.is_a?(Hash) ? msg[:text] : msg.to_s }.join("\n")
+                               else
+                                 "You are an AI assistant."
+                               end
+
+      messages = [
+        { role: 'system', content: system_message_content }
+      ] + Array(conversation_history)
+
+      model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
+      max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
+
+      request_body = {
+        model: model,
+        messages: messages,
+        stream: true, # Enable streaming
+        max_tokens: max_tokens
+      }
+
+      tools = Array(tools)
+      if tools.present?
+        request_body[:tools] = format_tools_for_openrouter(tools)
+        # request_body[:tool_choice] = { type: 'auto' }
+      end
+
+      Rails.logger.info("OpenRouter Streaming Request - Messages count: #{messages.size}")
+      Rails.logger.info("OpenRouter Streaming Request - Tools count: #{request_body[:tools]&.size || 0}")
+      
+      # Detailed request logging
+      if Rails.env.development?
+        Rails.logger.debug "OPENROUTER STREAMING REQUEST BODY: #{JSON.pretty_generate(request_body)}"
+      end
+
+      # Initialize variables to track the streaming response
+      accumulated_content = ""
+      tool_calls = []
+      model_name = nil
+      usage_info = nil
+      content_complete = false
+
+      response = client.post('chat/completions') do |req|
+        req.headers['Content-Type'] = 'application/json'
+        req.headers['Authorization'] = "Bearer #{api_key}"
+        req.headers['HTTP-Referer'] = LlmToolkit.config.referer_url
+        req.headers['X-Title'] = 'Development Environment'
+        req.body = request_body.to_json
+        req.options.on_data = proc do |chunk, size, env|
+          next if chunk.strip.empty?
+          
+          # Remove 'data: ' prefix from each line and skip comment lines
+          chunk.each_line do |line|
+            trimmed_line = line.strip
+            next if trimmed_line.empty? || trimmed_line.start_with?(':')
+            
+            # Check for [DONE] marker
+            if trimmed_line == 'data: [DONE]'
+              content_complete = true
+              next
+            end
+            
+            # Extract the JSON part from the SSE line
+            json_str = trimmed_line.sub(/^data: /, '')
+            
+            begin
+              # Parse the chunk JSON
+              json_data = JSON.parse(json_str)
+              
+              # Record model name if not yet set
+              model_name ||= json_data['model']
+              
+              # Check if this is a tool call chunk
+              first_choice = json_data['choices']&.first
+              if first_choice
+                # Record usage if present (typically in the final chunk)
+                usage_info = json_data['usage'] if json_data['usage']
+                
+                # Check for delta for text content
+                if first_choice['delta'] && first_choice['delta']['content']
+                  new_content = first_choice['delta']['content']
+                  accumulated_content += new_content
+                  
+                  # Pass the new content to the block
+                  yield({ 'chunk_type': 'content', 'content': new_content }) if block_given?
+                end
+                
+                # Check for a tool call in the delta
+                if first_choice['delta'] && first_choice['delta']['tool_calls']
+                  new_tool_calls = first_choice['delta']['tool_calls']
+                  
+                  # Process the tool call
+                  new_tool_calls.each do |tool_call|
+                    # Find existing tool call or create a new entry
+                    existing_tool_call = tool_calls.find { |tc| tc['id'] == tool_call['id'] }
+                    
+                    if existing_tool_call
+                      # Update the existing tool call
+                      if tool_call['function'] && tool_call['function']['arguments']
+                        existing_tool_call['function']['arguments'] ||= ''
+                        existing_tool_call['function']['arguments'] += tool_call['function']['arguments']
+                      end
+                    else
+                      # Add the new tool call
+                      tool_calls << tool_call
+                    end
+                  end
+                  
+                  # Signal that we have a tool call update
+                  yield({ 'chunk_type': 'tool_call_update', 'tool_calls': tool_calls }) if block_given?
+                end
+                
+                # Check for finish_reason (signals end of content or tool call)
+                if first_choice['finish_reason']
+                  content_complete = true
+                  
+                  # If we have a non-nil finish reason, the response is complete
+                  yield({ 'chunk_type': 'finish', 'finish_reason': first_choice['finish_reason'] }) if block_given?
+                end
+              end
+            rescue JSON::ParserError => e
+              Rails.logger.error("Failed to parse streaming chunk: #{e.message}, chunk: #{trimmed_line}")
+            end
+          end
+        end
+      end
+      
+      # Verify response code
+      unless (200..299).cover?(response.status)
+        Rails.logger.error("OpenRouter API streaming error: Status #{response.status}")
+        raise ApiError, "API streaming error: Status #{response.status}"
+      end
+      
+      # Format the final result
+      formatted_tool_calls = format_tools_response_from_openrouter(tool_calls) if tool_calls.any?
+      
+      # Return the complete response object
+      {
+        'content' => accumulated_content,
+        'model' => model_name,
+        'role' => 'assistant',
+        'stop_reason' => content_complete ? 'stop' : nil,
+        'stop_sequence' => nil,
+        'tool_calls' => formatted_tool_calls || [],
+        'usage' => usage_info
+      }
+    rescue Faraday::Error => e
+      Rails.logger.error("OpenRouter API streaming error: #{e.message}")
+      raise ApiError, "Network error during streaming: #{e.message}"
     end
 
     # Standardize the Anthropic API response to our internal format
