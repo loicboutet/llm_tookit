@@ -131,7 +131,7 @@ module LlmToolkit
       tools = Array(tools)
       if tools.present?
         request_body[:tools] = format_tools_for_openrouter(tools)
-        request_body[:tool_choice] = { type: 'auto' }
+       # request_body[:tool_choice] = { type: 'auto' }
       end
 
       Rails.logger.info("OpenRouter Request - Messages: #{messages}")
