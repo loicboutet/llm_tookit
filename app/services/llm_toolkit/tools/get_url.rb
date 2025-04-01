@@ -16,15 +16,9 @@ module LlmToolkit
         begin
           jina_service = LlmToolkit::JinaService.new
           content = jina_service.fetch_url_content(url)
-          
-          # Truncate the content if it's too large (prevents overwhelmingly large responses)
-          truncated_content = content.truncate(30000)
-          if truncated_content.length < content.length
-            Rails.logger.info "GetUrl: Content truncated from #{content.length} to #{truncated_content.length} characters"
-          end
-          
+                    
           # Convert result to properly formatted JSON string to ensure it's formatted correctly for OpenRouter
-          { result: "Title: #{url}\n\n#{truncated_content}" }
+          { result: "Title: #{url}\n\n#{content}" }
         rescue => e
           Rails.logger.error "GetUrl: Error fetching URL: #{e.message}"
           Rails.logger.error "GetUrl: #{e.backtrace.join("\n")}" if e.backtrace

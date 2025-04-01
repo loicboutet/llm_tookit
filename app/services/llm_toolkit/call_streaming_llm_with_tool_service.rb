@@ -14,7 +14,7 @@ module LlmToolkit
       @conversation = conversation
       @conversable = conversation.conversable
       @role = role || conversation.agent_type.to_sym
-      @user_id = user_id || Thread.current[:current_user_id]
+      @user_id = user_id
       @tool_classes = tool_classes 
 
       # Use passed tool classes or get from ToolService
