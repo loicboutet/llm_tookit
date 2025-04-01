@@ -144,9 +144,22 @@ module LlmToolkit
                                  "You are an AI assistant."
                                end
 
+      # Fix the nested content structure for conversation history
+      fixed_conversation_history = Array(conversation_history).map do |msg|
+        # If content is an array of objects with 'type' and 'text' properties, convert to string
+        if msg[:content].is_a?(Array) && msg[:content].all? { |item| item.is_a?(Hash) && item[:type] && item[:text] }
+          # Extract just the text from each content item
+          text_content = msg[:content].map { |item| item[:text] }.join("\n")
+          msg.merge(content: text_content)
+        else
+          # Keep as-is if already a string or other format
+          msg
+        end
+      end
+
       messages = [
         { role: 'system', content: system_message_content }
-      ] + Array(conversation_history)
+      ] + fixed_conversation_history
 
       model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
@@ -210,9 +223,22 @@ module LlmToolkit
                                  "You are an AI assistant."
                                end
 
+      # Fix the nested content structure for conversation history
+      fixed_conversation_history = Array(conversation_history).map do |msg|
+        # If content is an array of objects with 'type' and 'text' properties, convert to string
+        if msg[:content].is_a?(Array) && msg[:content].all? { |item| item.is_a?(Hash) && item[:type] && item[:text] }
+          # Extract just the text from each content item
+          text_content = msg[:content].map { |item| item[:text] }.join("\n")
+          msg.merge(content: text_content)
+        else
+          # Keep as-is if already a string or other format
+          msg
+        end
+      end
+
       messages = [
         { role: 'system', content: system_message_content }
-      ] + Array(conversation_history)
+      ] + fixed_conversation_history
 
       model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
