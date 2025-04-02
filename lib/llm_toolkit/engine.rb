@@ -19,21 +19,24 @@ module LlmToolkit
       end
     end
 
-    # Load concerns and models
+    # Load concerns and models, but only when not precompiling assets
     config.to_prepare do
-      # First load concerns
-      Dir.glob(Engine.root.join("app", "models", "concerns", "**", "*.rb")).each do |c|
-        require_dependency(c)
-      end
-      
-      # Then load models
-      Dir.glob(Engine.root.join("app", "models", "llm_toolkit", "*.rb")).each do |m|
-        require_dependency(m)
-      end
-      
-      # Load services
-      Dir.glob(Engine.root.join("app", "services", "llm_toolkit", "*.rb")).each do |s|
-        require_dependency(s)
+      # Skip model loading during asset precompilation
+      unless ENV['SECRET_KEY_BASE']&.start_with?('temporaryassetprecompilation') 
+        # First load concerns
+        Dir.glob(Engine.root.join("app", "models", "concerns", "**", "*.rb")).each do |c|
+          require_dependency(c)
+        end
+        
+        # Then load models
+        Dir.glob(Engine.root.join("app", "models", "llm_toolkit", "*.rb")).each do |m|
+          require_dependency(m)
+        end
+        
+        # Load services
+        Dir.glob(Engine.root.join("app", "services", "llm_toolkit", "*.rb")).each do |s|
+          require_dependency(s)
+        end
       end
     end
   end
