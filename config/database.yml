@@ -1,5 +1,0 @@
-# This is a dummy configuration for the engine to use during initialization
-# The actual database configuration will come from the parent application
-dummy:
-  adapter: sqlite3
-  database: ":memory:"
