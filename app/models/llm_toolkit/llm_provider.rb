@@ -278,11 +278,14 @@ module LlmToolkit
         req.headers['X-Title'] = 'Development Environment'
         req.body = request_body.to_json
         req.options.on_data = proc do |chunk, size, env|
+          # Force chunk encoding to UTF-8 to prevent Encoding::CompatibilityError
+          chunk.force_encoding('UTF-8')
           next if chunk.strip.empty?
           
           # Remove 'data: ' prefix from each line and skip comment lines
           chunk.each_line do |line|
-            trimmed_line = line.strip
+            # Ensure line is also UTF-8, though force_encoding on chunk should handle this
+            trimmed_line = line.strip 
             next if trimmed_line.empty? || trimmed_line.start_with?(':')
             
             # Check for [DONE] marker

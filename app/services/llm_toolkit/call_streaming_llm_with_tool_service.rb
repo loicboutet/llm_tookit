@@ -1,17 +1,24 @@
+# Ensure Turbo::StreamsChannel is available
+require 'turbo-rails' 
+
 module LlmToolkit
   class CallStreamingLlmWithToolService
-    attr_reader :llm_provider, :conversation, :conversable, :role, :tools, :user_id, :tool_classes
+    # Rendering helpers removed - broadcasting raw chunks
+
+    attr_reader :llm_provider, :conversation, :assistant_message, :conversable, :role, :tools, :user_id, :tool_classes
 
     # Initialize the service with necessary parameters
     #
     # @param llm_provider [LlmProvider] The provider to use for LLM calls
-    # @param conversation [Conversation] The conversation to update
+    # @param conversation [Conversation] The conversation context
+    # @param assistant_message [Message] The pre-created empty assistant message record
     # @param tool_classes [Array<Class>] Optional tool classes to use
     # @param role [Symbol] Role to use for conversation history
     # @param user_id [Integer] ID of the user making the request
-    def initialize(llm_provider:, conversation:, tool_classes: [], role: nil, user_id: nil)
+    def initialize(llm_provider:, conversation:, assistant_message:, tool_classes: [], role: nil, user_id: nil)
       @llm_provider = llm_provider
       @conversation = conversation
+      @assistant_message = assistant_message # Store the passed message
       @conversable = conversation.conversable
       @role = role || conversation.agent_type.to_sym
       @user_id = user_id
@@ -24,11 +31,11 @@ module LlmToolkit
         ToolService.tool_definitions
       end
       
-      # Initialize variables to track streamed content
-      @current_content = ""
-      @current_message = nil
+      # Initialize variables to track streamed content using the passed message
+      @current_message = @assistant_message # Use the passed message
+      @current_content = @current_message.content || "" # Initialize content from message
       @content_complete = false
-      @content_chunks_received = false
+      @content_chunks_received = @current_content.present?
       @current_tool_calls = []
       @processed_tool_call_ids = Set.new
       @special_url_input = nil
@@ -36,12 +43,11 @@ module LlmToolkit
     end
 
     # Main method to call the LLM and process the streamed response
-    # @param chunk_callback [Proc] Optional callback to receive content chunks (for Turbo Streams, etc.)
     # @return [Boolean] Success status
-    def call(chunk_callback = nil)
+    def call
       # Return if LLM provider is missing
       return false unless @llm_provider
-      
+
       # Validate provider supports streaming
       unless @llm_provider.provider_type == 'openrouter'
         Rails.logger.error("Streaming not supported for provider: #{@llm_provider.provider_type}")
@@ -51,10 +57,10 @@ module LlmToolkit
       begin
         # Set conversation to working status
         @conversation.update(status: :working)
-        
+
         # Start the LLM streaming interaction
-        stream_llm(chunk_callback)
-        
+        stream_llm
+
         true
       rescue => e
         Rails.logger.error("Error in CallStreamingLlmWithToolService: #{e.message}")
@@ -69,8 +75,7 @@ module LlmToolkit
     private
 
     # Stream responses from the LLM and process chunks
-    # @param chunk_callback [Proc] Optional callback for content chunks
-    def stream_llm(chunk_callback = nil)
+    def stream_llm
       # Get system prompt
       sys_prompt = if @conversable.respond_to?(:generate_system_messages)
                      @conversable.generate_system_messages(@role)
@@ -81,14 +86,13 @@ module LlmToolkit
       # Get conversation history
       conv_history = @conversation.history(@role, provider_type: @llm_provider.provider_type)
       
-      # Create a message for the initial streaming response
-      @current_message = create_empty_message
+      # NOTE: No need to create a message here, it's passed in via initialize
       
       # Call the LLM with streaming and handle each chunk
       final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
-        process_chunk(chunk, chunk_callback)
+        process_chunk(chunk)
       end
-      
+
       # Handle any tool calls in the final response (if we didn't process them during streaming)
       if final_response && final_response['tool_calls'].present? && !@content_chunks_received
         dangerous_encountered = process_tool_calls(final_response['tool_calls'])
@@ -100,10 +104,10 @@ module LlmToolkit
           
           # Create a new message for the follow-up response
           Rails.logger.info("Making follow-up call to LLM with tool results from final response")
-          followup_with_tools(chunk_callback)
+          followup_with_tools
         end
       end
-      
+
       # Special case: If we collected a URL input but haven't created a get_url tool yet, create one now
       if @special_url_input && !@current_message.tool_uses.exists?(name: "get_url")
         dangerous_encountered = handle_special_url_tool
@@ -115,10 +119,10 @@ module LlmToolkit
           
           # Create a new message for the follow-up response
           Rails.logger.info("Making follow-up call to LLM with tool results from special URL")
-          followup_with_tools(chunk_callback)
+          followup_with_tools
         end
       end
-      
+
       # Check if we have any tool results but haven't done a follow-up yet
       if @tool_results_pending && !@conversation.waiting?
         # Add a small delay to ensure tool results are saved to the database
@@ -126,16 +130,15 @@ module LlmToolkit
         
         # Log that we're doing a follow-up after the end of streaming
         Rails.logger.info("Making follow-up call to LLM after end of streaming")
-        followup_with_tools(chunk_callback)
+        followup_with_tools
       end
     end
-    
+
     # Make a follow-up call to the LLM with the tool results
-    # @param chunk_callback [Proc] Optional callback for content chunks
-    def followup_with_tools(chunk_callback = nil)
+    def followup_with_tools
       # Skip if we're already waiting for approval
       return if @conversation.waiting?
-      
+
       Rails.logger.info("Starting follow-up call to LLM with tool results")
       
       # Reset streaming variables
@@ -162,9 +165,9 @@ module LlmToolkit
       
       # Call the LLM with streaming and handle each chunk
       final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
-        process_chunk(chunk, chunk_callback)
+        process_chunk(chunk)
       end
-      
+
       # Handle any tool calls in the final response (if we didn't process them during streaming)
       if final_response && final_response['tool_calls'].present? && !@content_chunks_received
         dangerous_encountered = process_tool_calls(final_response['tool_calls'])
@@ -172,27 +175,34 @@ module LlmToolkit
         # Recursively call followup_with_tools if we have more tool results
         if !dangerous_encountered && @tool_results_pending
           sleep(0.5)
-          followup_with_tools(chunk_callback)
+          followup_with_tools
         end
       end
     end
-    
+
     # Process an individual chunk from the streaming response
     # @param chunk [Hash] The chunk data from the streamed response
-    # @param chunk_callback [Proc] Optional callback to receive content chunks
-    def process_chunk(chunk, chunk_callback = nil)
+    def process_chunk(chunk)
       case chunk[:chunk_type]
       when 'content'
         # Append content to the current message
         @current_content += chunk[:content]
         @content_chunks_received = true
-        
-        # Update the message with the new content
+
+        # Update the database record (use update_column to avoid callbacks/broadcasts)
+        # Update the database record (still useful to save the final state)
+        # Update the database record (still useful to save the final state)
         @current_message.update(content: @current_content)
-        
-        # Pass the chunk to the callback if provided
-        chunk_callback.call(chunk[:content]) if chunk_callback
-        
+
+        # Broadcast Turbo Stream append action targeting the *inner content div* ID
+        # target_id = "#{ActionView::RecordIdentifier.dom_id(@current_message)}_content" 
+        # Turbo::StreamsChannel.broadcast_append_to(
+        #   # Use the stream name derived from the conversation model instance
+        #   @conversation.to_gid_param, 
+        #   target: target_id, # Target the inner div
+        #   content: chunk[:content] # Send the raw chunk content
+        # )
+
       when 'tool_call_update'
         # Examine the tool calls for special handling
         examine_tool_calls_for_special_cases(chunk[:tool_calls])
@@ -433,14 +443,15 @@ module LlmToolkit
         false
       end
     end
-    
-    # Create an initial empty message for streaming content
-    # @return [Message] The created message
+
+    # Create a new empty message for the follow-up response
+    # This is needed internally when tools are executed and a new LLM call is made.
     def create_empty_message
       @conversation.messages.create!(
         role: 'assistant',
-        content: '',
-        user_id: @user_id
+        content: '', # Start empty
+        # llm_provider_id: @llm_provider.id, # Removed provider association
+        user_id: @user_id # Ensure user_id is associated if available
       )
     end
   end

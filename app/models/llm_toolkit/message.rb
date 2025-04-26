@@ -1,9 +1,21 @@
 module LlmToolkit
   class Message < ApplicationRecord
     belongs_to :conversation, touch: true
+    # belongs_to :llm_provider, class_name: 'LlmToolkit::LlmProvider', optional: true # Removed association
     has_many :tool_uses, class_name: 'LlmToolkit::ToolUse', dependent: :destroy
     has_many :tool_results, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
-    
+
+    # NOTE: broadcasts_refreshes removed to prevent conflicts with manual streaming broadcasts
+    after_update_commit :broadcast_content_change, if: :saved_change_to_content?
+
+    def broadcast_content_change
+      broadcast_replace_later_to(
+        conversation,                         # same stream you subscribe to
+        target: "message_#{self.id}",       # "message_123_content"
+        partial: "messages/message",          # tiny partial (see below)
+        locals: { message: self }
+      )
+    end    
     # Attachments for user uploads (images, PDFs)
     has_many_attached :attachments
 

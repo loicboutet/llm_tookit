@@ -5,8 +5,6 @@ module LlmToolkit
     has_many :messages, class_name: 'LlmToolkit::Message', dependent: :destroy
     has_many :tool_uses, through: :messages, class_name: 'LlmToolkit::ToolUse'
 
-    broadcasts_refreshes
-
     # Explicitly declare the attribute type for the enum
     attribute :agent_type, :integer
     attribute :status, :string
