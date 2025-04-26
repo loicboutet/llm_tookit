@@ -4,6 +4,9 @@ module LlmToolkit
     has_many :tool_uses, class_name: 'LlmToolkit::ToolUse', dependent: :destroy
     has_many :tool_results, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
     
+    # Attachments for user uploads (images, PDFs)
+    has_many_attached :attachments
+
     validates :role, presence: true
     
     # Support for ActiveStorage if it's available and properly set up
