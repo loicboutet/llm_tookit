@@ -5,10 +5,22 @@ module LlmToolkit
     has_many :tool_uses, class_name: 'LlmToolkit::ToolUse', dependent: :destroy
     has_many :tool_results, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
 
-    # NOTE: broadcasts_refreshes removed to prevent conflicts with manual streaming broadcasts
-    after_update_commit :broadcast_content_change, if: :saved_change_to_content?
+    # Broadcast appending new assistant messages and replacing updated ones
+    after_create_commit :broadcast_append_to_list, if: :llm_content?
+    after_update_commit :broadcast_replace_in_list, if: :saved_change_to_content?
 
-    def broadcast_content_change
+    # Appends the new message partial to the conversation's message list
+    def broadcast_append_to_list
+      broadcast_append_later_to(
+        conversation,                         # Stream name derived from the conversation
+        target: "conversation-messages",      # The ID of the div inside the messages frame
+        partial: "messages/message",          # The message partial
+        locals: { message: self }
+      )
+    end
+
+    # Replaces the existing message partial when content changes
+    def broadcast_replace_in_list
       broadcast_replace_later_to(
         conversation,                         # same stream you subscribe to
         target: "message_#{self.id}",       # "message_123_content"

@@ -10,7 +10,11 @@ module LlmToolkit
     after_create :touch_conversation
     after_update :touch_conversation
     after_destroy :touch_conversation
-    
+
+    # Broadcast changes to the conversation stream
+    after_create_commit :broadcast_append_to_message
+    after_update_commit :broadcast_replace_in_message
+
     def dangerous?
       LlmToolkit.config.dangerous_tools.include?(name)
     end
@@ -40,6 +44,26 @@ module LlmToolkit
     
     def touch_conversation
       message.conversation.touch
+    end
+
+    # Broadcasts appending the tool use partial to its message
+    def broadcast_append_to_message
+      broadcast_append_later_to(
+        message.conversation,               # Stream name derived from the conversation
+        target: "tool_uses_for_message_#{message.id}", # Target container within the message partial
+        partial: "tool_uses/tool_use",      # The specific tool use partial
+        locals: { tool_use: self }
+      )
+    end
+
+    # Broadcasts replacing the tool use partial within its message
+    def broadcast_replace_in_message
+      broadcast_replace_later_to(
+        message.conversation,               # Stream name derived from the conversation
+        target: self,                       # Target the tool_use partial itself by DOM ID
+        partial: "tool_uses/tool_use",      # The specific tool use partial
+        locals: { tool_use: self }
+      )
     end
   end
 end
