@@ -36,7 +36,8 @@ module LlmToolkit
       @current_content = @current_message.content || "" # Initialize content from message
       @content_complete = false
       @content_chunks_received = @current_content.present?
-      @current_tool_calls = []
+      # @current_tool_calls = [] # Replaced by accumulated_tool_calls
+      @accumulated_tool_calls = {} # Accumulate tool call chunks by index
       @processed_tool_call_ids = Set.new
       @special_url_input = nil
       @tool_results_pending = false
@@ -93,10 +94,16 @@ module LlmToolkit
         process_chunk(chunk)
       end
 
-      # Handle any tool calls in the final response (if we didn't process them during streaming)
-      if final_response && final_response['tool_calls'].present? && !@content_chunks_received
-        dangerous_encountered = process_tool_calls(final_response['tool_calls'])
-        
+      # Final processing happens within the 'finish' chunk handler now.
+      # Tool calls from the final_response might be redundant if streaming worked correctly,
+      # but we keep this block as a fallback, although it might need review later
+      # if it causes duplicate processing.
+      if final_response && final_response['tool_calls'].present? && !@content_chunks_received && @accumulated_tool_calls.empty?
+        Rails.logger.warn("Processing tool calls from final_response as no streaming chunks were processed.")
+        # Format the tool calls from the final response
+        formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, final_response['tool_calls'])
+        dangerous_encountered = process_tool_calls(formatted_tool_calls)
+
         # Make another call to the LLM with the tool results if we have some and no dangerous tools
         if !dangerous_encountered && @tool_results_pending
           # Add a small delay to ensure tool results are saved to the database
@@ -143,7 +150,8 @@ module LlmToolkit
       
       # Reset streaming variables
       @current_content = ""
-      @current_tool_calls = []
+      # @current_tool_calls = [] # Replaced
+      @accumulated_tool_calls = {} # Reset accumulator
       @processed_tool_call_ids = Set.new
       @content_complete = false
       @content_chunks_received = false
@@ -204,21 +212,36 @@ module LlmToolkit
         # )
 
       when 'tool_call_update'
-        # Examine the tool calls for special handling
-        examine_tool_calls_for_special_cases(chunk[:tool_calls])
-        
-        # Store the current state of tool calls
-        @current_tool_calls = chunk[:tool_calls]
-        
+        # Accumulate tool call updates based on index
+        chunk[:tool_calls].each do |partial_tool_call|
+          index = partial_tool_call['index']
+          next unless index.is_a?(Integer) # Ensure we have a valid index
+
+          @accumulated_tool_calls[index] ||= {}
+          # Use deep_merge! to combine nested structures like the 'function' hash
+          @accumulated_tool_calls[index].deep_merge!(partial_tool_call)
+        end
+        # @current_tool_calls is no longer used here
+
       when 'finish'
         @content_complete = true
-        
-        # If we received tool calls, process them
-        if @current_tool_calls.present?
+
+        # If we accumulated tool calls, process them
+        unless @accumulated_tool_calls.empty?
+          complete_tool_calls = @accumulated_tool_calls.values.sort_by { |tc| tc['index'] || 0 } # Sort by index just in case
+          Rails.logger.debug "Accumulated complete tool calls: #{complete_tool_calls.inspect}"
+
+          # Examine the *complete* tool calls for special handling
+          examine_tool_calls_for_special_cases(complete_tool_calls)
+
           # Format the tool calls to our internal format
-          formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, @current_tool_calls)
+          formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, complete_tool_calls)
+          Rails.logger.debug "Formatted tool calls for processing: #{formatted_tool_calls.inspect}"
+
           process_tool_calls(formatted_tool_calls)
         end
+        # Reset accumulator for potential follow-up calls
+        @accumulated_tool_calls = {}
       end
     end
     
