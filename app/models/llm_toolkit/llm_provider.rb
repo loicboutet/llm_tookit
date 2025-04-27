@@ -168,6 +168,7 @@ module LlmToolkit
         model: model,
         messages: messages,
         stream: false,
+        usage: true,
         max_tokens: max_tokens
       }
 
@@ -247,6 +248,7 @@ module LlmToolkit
         model: model,
         messages: messages,
         stream: true, # Enable streaming
+        usage: true,
         max_tokens: max_tokens
       }
 
@@ -300,7 +302,8 @@ module LlmToolkit
             begin
               # Parse the chunk JSON
               json_data = JSON.parse(json_str)
-              
+              Rails.logger.info("OpenRouter chunk : #{json_data}")
+
               # Record model name if not yet set
               model_name ||= json_data['model']
               

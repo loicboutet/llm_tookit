@@ -4,6 +4,15 @@ module LlmToolkit
       description "Fetch content from a URL using the Jina AI service. The URL must use HTTP or HTTPS protocol."
       
       param :url, desc: "The URL to fetch content from (must be HTTP/HTTPS)"
+
+      # Metadata for display purposes
+      def self.display_metadata
+        {
+          french_name: "Consulter une URL",
+          icon: "bi bi-link-45deg",
+          displayed_args: ["url"]
+        }
+      end
       
       def execute(conversable:, tool_use:, url:)
         # Validate URL format

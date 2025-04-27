@@ -93,6 +93,17 @@ module LlmToolkit
       final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
         process_chunk(chunk)
       end
+      
+      # Update the current message with usage data if available
+      if final_response && final_response['usage']
+        usage = final_response['usage']
+        # Update message with usage, using the renamed column
+        @current_message.update(
+          prompt_tokens: usage['prompt_tokens'].to_i,
+          completion_tokens: usage['completion_tokens'].to_i,
+          api_total_tokens: usage['total_tokens'].to_i # Use renamed column
+        )
+      end
 
       # Final processing happens within the 'finish' chunk handler now.
       # Tool calls from the final_response might be redundant if streaming worked correctly,
@@ -174,6 +185,17 @@ module LlmToolkit
       # Call the LLM with streaming and handle each chunk
       final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
         process_chunk(chunk)
+      end
+      
+      # Update the current message (the follow-up message) with usage data if available
+      if final_response && final_response['usage']
+        usage = final_response['usage']
+        # Update follow-up message with usage, using the renamed column
+        @current_message.update(
+          prompt_tokens: usage['prompt_tokens'].to_i,
+          completion_tokens: usage['completion_tokens'].to_i,
+          api_total_tokens: usage['total_tokens'].to_i # Use renamed column
+        )
       end
 
       # Handle any tool calls in the final response (if we didn't process them during streaming)

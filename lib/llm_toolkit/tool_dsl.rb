@@ -31,7 +31,9 @@ module LlmToolkit
       # Track inheritance to make sure tools are properly registered
       def inherited(subclass)
         super
-        Rails.logger.info "Registered tool: #{subclass.name}" if defined?(Rails)
+        # Register with the central registry
+        LlmToolkit::ToolRegistry.register(subclass)
+        Rails.logger.info "Registered DSL tool: #{subclass.name}" if defined?(Rails)
       end
       
       # Convert our DSL to the schema expected by LLMs

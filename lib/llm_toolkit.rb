@@ -4,6 +4,7 @@ require "faraday/retry"
 
 # Internal components
 require "llm_toolkit/tool_dsl"
+require "llm_toolkit/tool_registry" # Add this line
 require "llm_toolkit/configuration"
 require "llm_toolkit/engine"
 

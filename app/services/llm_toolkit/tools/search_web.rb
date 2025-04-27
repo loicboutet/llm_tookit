@@ -12,6 +12,15 @@ module LlmToolkit
       param :with_links_summary, type: :boolean, desc: "Optional: Include a summary of all links at the end", required: false
       param :with_images_summary, type: :boolean, desc: "Optional: Include a summary of all images at the end", required: false
       param :no_cache, type: :boolean, desc: "Optional: Bypass cache and retrieve real-time data", required: false
+
+      # Metadata for display purposes
+      def self.display_metadata
+        {
+          french_name: "Recherche Web",
+          icon: "bi bi-search",
+          displayed_args: ["query"]
+        }
+      end
       
       def execute(conversable:, tool_use:, query:, country_code: nil, language_code: nil, 
                   results_count: nil, page: nil, site: nil, with_links_summary: false, 

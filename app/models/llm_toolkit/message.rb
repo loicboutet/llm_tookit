@@ -1,3 +1,6 @@
+# Include ActionView helpers needed for dom_id
+include ActionView::RecordIdentifier
+
 module LlmToolkit
   class Message < ApplicationRecord
     belongs_to :conversation, touch: true
@@ -7,27 +10,37 @@ module LlmToolkit
 
     # Broadcast appending new assistant messages and replacing updated ones
     after_create_commit :broadcast_append_to_list, if: :llm_content?
-    after_update_commit :broadcast_replace_in_list, if: :saved_change_to_content?
+    after_update_commit :broadcast_replace_in_list, if: -> { saved_change_to_content? && !saved_change_to_api_total_tokens? }
+    # Broadcast usage stats update when tokens change
+    after_update_commit :broadcast_usage_stats_update, if: :saved_change_to_api_total_tokens?
 
     # Appends the new message partial to the conversation's message list
     def broadcast_append_to_list
+      # Find the previous message in the conversation to determine its role
+      previous_message = conversation.messages.order(created_at: :asc).where("created_at < ?", self.created_at).last
+      previous_role = previous_message&.role
+
       broadcast_append_later_to(
         conversation,                         # Stream name derived from the conversation
         target: "conversation-messages",      # The ID of the div inside the messages frame
         partial: "messages/message",          # The message partial
-        locals: { message: self }
+        locals: { message: self, previous_message_role: previous_role } # Pass previous role
       )
     end
 
     # Replaces the existing message partial when content changes
     def broadcast_replace_in_list
+      # Find the previous message in the conversation to determine its role
+      previous_message = conversation.messages.order(created_at: :asc).where("created_at < ?", self.created_at).last
+      previous_role = previous_message&.role
+
       broadcast_replace_later_to(
         conversation,                         # same stream you subscribe to
-        target: "message_#{self.id}",       # "message_123_content"
-        partial: "messages/message",          # tiny partial (see below)
-        locals: { message: self }
+        target: dom_id(self),                 # Target the entire message div for replacement
+        partial: "messages/message",          # The message partial
+        locals: { message: self, previous_message_role: previous_role } # Pass previous role
       )
-    end    
+    end
     # Attachments for user uploads (images, PDFs)
     has_many_attached :attachments
 
@@ -87,6 +100,16 @@ module LlmToolkit
     end
     
     private
+    
+    # Broadcasts an update to the conversation's usage stats frame
+    def broadcast_usage_stats_update
+      broadcast_replace_later_to(
+        conversation,
+        target: dom_id(conversation, "usage_stats"), # Target the turbo frame
+        partial: "conversations/usage_stats",
+        locals: { conversation: conversation }
+      )
+    end
 
     def deduplicate_images
       return if images.blank?

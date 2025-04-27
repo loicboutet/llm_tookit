@@ -16,7 +16,9 @@ module LlmToolkit
 
         def inherited(subclass)
           super
-          # Make sure subclasses is initialized
+          # Register with the central registry
+          LlmToolkit::ToolRegistry.register(subclass)
+          # Keep track of direct subclasses if needed elsewhere, though registry is primary now
           subclasses << subclass
         end
       end
@@ -27,6 +29,18 @@ module LlmToolkit
 
       def self.definition
         raise NotImplementedError, "#{self.name} does not implement definition method"
+      end
+
+      # Default display metadata - subclasses should override this
+      # :french_name - Human-readable name in French
+      # :icon - CSS class for an icon (e.g., 'bi bi-search')
+      # :displayed_args - Array of argument keys to show in the summary line
+      def self.display_metadata
+        {
+          french_name: definition[:name], # Default to technical name
+          icon: nil,
+          displayed_args: []
+        }
       end
 
       def self.load_tools

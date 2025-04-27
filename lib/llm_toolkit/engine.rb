@@ -2,6 +2,9 @@ module LlmToolkit
   class Engine < ::Rails::Engine
     isolate_namespace LlmToolkit
 
+    # Add the engine's lib directory to the autoload paths
+    config.autoload_paths << File.expand_path("../../../lib", __FILE__)
+
     # Don't try to directly manipulate the Rails application's paths here
     # Instead, we'll use the built-in Rails engine functionality
     # to copy migrations via the Rake task
