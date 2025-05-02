@@ -161,6 +161,8 @@ module LlmToolkit
       end
 
       # Check if we have any tool results but haven't done a follow-up yet
+      # This is CRITICAL - this is where the follow-up after tool execution happens
+      Rails.logger.info("End of stream_llm - Tool results pending: #{@tool_results_pending}, Conversation waiting: #{@conversation.waiting?}")
       if @tool_results_pending && !@conversation.waiting?
         # Add a small delay to ensure tool results are saved to the database
         sleep(0.5)
@@ -343,7 +345,15 @@ module LlmToolkit
             formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, complete_tool_calls)
             Rails.logger.debug "Formatted tool calls for processing: #{formatted_tool_calls.inspect}"
 
-            process_tool_calls(formatted_tool_calls)
+            dangerous_encountered = process_tool_calls(formatted_tool_calls)
+            
+            # Immediately check if we need a follow-up call for tools
+            if @tool_results_pending && !@conversation.waiting? && !dangerous_encountered
+              Rails.logger.info("Tool results pending after processing tools in 'finish' handler - initiating followup")
+              followup_with_tools
+            else
+              Rails.logger.info("No immediate followup needed: pending=#{@tool_results_pending}, waiting=#{@conversation.waiting?}, dangerous=#{dangerous_encountered}")
+            end
           end
           # Reset accumulator for potential follow-up calls
           @accumulated_tool_calls = {}
@@ -584,9 +594,17 @@ module LlmToolkit
       # Find the tool class
       Rails.logger.info("Executing tool: #{tool_use.name}")
       tool_class = @tool_classes.find { |tool| tool.definition[:name] == tool_use.name }
+      
+      # If tool class wasn't found in the specific ones, check the global registry
       unless tool_class
-        Rails.logger.warn("Tool class not found for #{tool_use.name}")
-        return false
+        tool_registry_class = LlmToolkit::ToolRegistry.find_tool(tool_use.name)
+        if tool_registry_class
+          Rails.logger.info("Found tool in global registry: #{tool_use.name}")
+          tool_class = tool_registry_class
+        else
+          Rails.logger.warn("Tool class not found for #{tool_use.name}")
+          return false
+        end
       end
       
       begin
