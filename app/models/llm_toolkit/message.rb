@@ -5,6 +5,7 @@ module LlmToolkit
   class Message < ApplicationRecord
     belongs_to :conversation, touch: true
     # belongs_to :llm_provider, class_name: 'LlmToolkit::LlmProvider', optional: true # Removed association
+    # belongs_to :llm_model, class_name: 'LlmToolkit::LlmModel', optional: true # Removed association
     has_many :tool_uses, class_name: 'LlmToolkit::ToolUse', dependent: :destroy
     has_many :tool_results, class_name: 'LlmToolkit::ToolResult', dependent: :destroy
 

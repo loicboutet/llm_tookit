@@ -5,24 +5,25 @@ module LlmToolkit
   class CallStreamingLlmWithToolService
     # Rendering helpers removed - broadcasting raw chunks
 
-    attr_reader :llm_provider, :conversation, :assistant_message, :conversable, :role, :tools, :user_id, :tool_classes
+    attr_reader :llm_model, :llm_provider, :conversation, :assistant_message, :conversable, :role, :tools, :user_id, :tool_classes, :broadcast_to
 
     # Initialize the service with necessary parameters
     #
-    # @param llm_provider [LlmProvider] The provider to use for LLM calls
+    # @param llm_model [LlmModel] The model to use for LLM calls
     # @param conversation [Conversation] The conversation context
     # @param assistant_message [Message] The pre-created empty assistant message record
     # @param tool_classes [Array<Class>] Optional tool classes to use
-    # @param role [Symbol] Role to use for conversation history
     # @param user_id [Integer] ID of the user making the request
-    def initialize(llm_provider:, conversation:, assistant_message:, tool_classes: [], role: nil, user_id: nil)
-      @llm_provider = llm_provider
+    # @param broadcast_to [String, nil] Optional channel for broadcasting updates
+    def initialize(llm_model:, conversation:, assistant_message:, tool_classes: [], user_id: nil, broadcast_to: nil)
+      @llm_model = llm_model
+      @llm_provider = @llm_model.llm_provider # Derive provider from model
       @conversation = conversation
       @assistant_message = assistant_message # Store the passed message
       @conversable = conversation.conversable
-      @role = role || conversation.agent_type.to_sym
+      # @role = role || conversation.agent_type.to_sym # Role removed
       @user_id = user_id
-      @tool_classes = tool_classes 
+      @tool_classes = tool_classes
 
       # Use passed tool classes or get from ToolService
       @tools = if tool_classes.any?
@@ -41,17 +42,24 @@ module LlmToolkit
       @processed_tool_call_ids = Set.new
       @special_url_input = nil
       @tool_results_pending = false
+      
+      # Add followup count to prevent infinite loops
+      @followup_count = 0
+      @max_followups = 10 # Safety limit
+
+      # Track the last error to avoid repeated error messages
+      @last_error = nil
     end
 
     # Main method to call the LLM and process the streamed response
     # @return [Boolean] Success status
     def call
-      # Return if LLM provider is missing
-      return false unless @llm_provider
+      # Return if LLM model or provider is missing
+      return false unless @llm_model && @llm_provider
 
       # Validate provider supports streaming
       unless @llm_provider.provider_type == 'openrouter'
-        Rails.logger.error("Streaming not supported for provider: #{@llm_provider.provider_type}")
+        Rails.logger.error("Streaming not supported for provider type: #{@llm_provider.provider_type}")
         return false
       end
 
@@ -66,10 +74,18 @@ module LlmToolkit
       rescue => e
         Rails.logger.error("Error in CallStreamingLlmWithToolService: #{e.message}")
         Rails.logger.error(e.backtrace.join("\n"))
+        
+        # Update message with error info if empty
+        if @current_message && @current_message.content.blank?
+          @current_message.update(
+            content: "Sorry, an error occurred: #{e.message.truncate(200)}"
+          )
+        end
+        
         false
       ensure
         # Set conversation status to resting when done, unless waiting for approval
-        @conversation.update(status: :resting) unless @conversation.waiting?
+        @conversation.update(status: :resting) unless @conversation.status_waiting?
       end
     end
 
@@ -81,19 +97,22 @@ module LlmToolkit
       sys_prompt = if @conversable.respond_to?(:generate_system_messages)
                      @conversable.generate_system_messages(@role)
                    else
-                     []
-                   end
+                      []
+                    end
 
-      # Get conversation history
-      conv_history = @conversation.history(@role, provider_type: @llm_provider.provider_type)
-      
+      # Get conversation history, formatted for the specific model's provider type
+      # Role argument removed from history call
+      conv_history = @conversation.history(llm_model: @llm_model)
+
       # NOTE: No need to create a message here, it's passed in via initialize
       
-      # Call the LLM with streaming and handle each chunk
+      # Call the LLM provider with streaming and handle each chunk
+      # (Provider's stream_chat method will need refactoring later)
+      # TODO: Refactor LlmProvider#stream_chat to accept llm_model details
       final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
         process_chunk(chunk)
       end
-      
+
       # Update the current message with usage data if available
       if final_response && final_response['usage']
         usage = final_response['usage']
@@ -156,8 +175,18 @@ module LlmToolkit
     def followup_with_tools
       # Skip if we're already waiting for approval
       return if @conversation.waiting?
+      
+      # Increment followup count and check safety limit
+      @followup_count += 1
+      if @followup_count > @max_followups
+        Rails.logger.warn("Exceeded maximum number of followup calls (#{@max_followups}). Stopping.")
+        return
+      end
 
-      Rails.logger.info("Starting follow-up call to LLM with tool results")
+      Rails.logger.info("Starting follow-up call ##{@followup_count} to LLM with tool results")
+      
+      # Keep track of whether we had tool results before this call
+      had_tool_results = @tool_results_pending
       
       # Reset streaming variables
       @current_content = ""
@@ -172,98 +201,165 @@ module LlmToolkit
       sys_prompt = if @conversable.respond_to?(:generate_system_messages)
                      @conversable.generate_system_messages(@role)
                    else
-                     []
-                   end
-      conv_history = @conversation.history(@role, provider_type: @llm_provider.provider_type)
-      
+                      []
+                     end
+      # Get updated conversation history with tool results, formatted for the model
+      # Role argument removed from history call
+      conv_history = @conversation.history(llm_model: @llm_model)
+
       # Log the conversation history for debugging
       Rails.logger.debug("Follow-up conversation history size: #{conv_history.size}")
       
-      # Create a new message for the followup response
+      # Create a new message for the followup response, associated with the model
       @current_message = create_empty_message
-      
-      # Call the LLM with streaming and handle each chunk
-      final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
-        process_chunk(chunk)
-      end
-      
-      # Update the current message (the follow-up message) with usage data if available
-      if final_response && final_response['usage']
-        usage = final_response['usage']
-        # Update follow-up message with usage, using the renamed column
-        @current_message.update(
-          prompt_tokens: usage['prompt_tokens'].to_i,
-          completion_tokens: usage['completion_tokens'].to_i,
-          api_total_tokens: usage['total_tokens'].to_i # Use renamed column
-        )
-      end
 
-      # Handle any tool calls in the final response (if we didn't process them during streaming)
-      if final_response && final_response['tool_calls'].present? && !@content_chunks_received
-        dangerous_encountered = process_tool_calls(final_response['tool_calls'])
+      begin
+        # Call the LLM provider with streaming and handle each chunk
+        # (Provider's stream_chat method will need refactoring later)
+        # TODO: Refactor LlmProvider#stream_chat to accept llm_model details
+        final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
+          process_chunk(chunk)
+        end
+
+        # Update the current message (the follow-up message) with usage data if available
+        if final_response && final_response['usage']
+          usage = final_response['usage']
+          # Update follow-up message with usage, using the renamed column
+          @current_message.update(
+            prompt_tokens: usage['prompt_tokens'].to_i,
+            completion_tokens: usage['completion_tokens'].to_i,
+            api_total_tokens: usage['total_tokens'].to_i # Use renamed column
+          )
+        end
+
+        # Handle any tool calls in the final response (if we didn't process them during streaming)
+        if final_response && final_response['tool_calls'].present? && !@content_chunks_received
+          formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, final_response['tool_calls'])
+          dangerous_encountered = process_tool_calls(formatted_tool_calls)
+          
+          # Recursively call followup_with_tools if we have more tool results
+          if !dangerous_encountered && @tool_results_pending
+            sleep(0.5)
+            followup_with_tools
+          end
+        end
         
-        # Recursively call followup_with_tools if we have more tool results
-        if !dangerous_encountered && @tool_results_pending
+        # Important: If we had tool results before, but now @tool_results_pending is false
+        # and still no dangerous tools encountered, check if the LLM is still trying to use tools
+        # This is important for multi-step tool interactions
+        if had_tool_results && !@tool_results_pending && !@conversation.waiting? &&
+          @current_message.content.present? && looks_like_attempting_tool_use(@current_message.content)
+          
+          Rails.logger.info("LLM appears to be attempting to use tools again. Making another follow-up call.")
+          @tool_results_pending = true
           sleep(0.5)
           followup_with_tools
         end
+      rescue => e
+        # Log the error
+        error_message = "Error in followup call: #{e.message}"
+        Rails.logger.error(error_message)
+        Rails.logger.error(e.backtrace.join("\n"))
+        
+        # Update message with error only if it's empty
+        if @current_message && @current_message.content.blank?
+          @current_message.update(
+            content: "Sorry, an error occurred during follow-up: #{e.message.truncate(200)}"
+          )
+        end
       end
+    end
+    
+    # Check if the message content looks like it's attempting to use a tool
+    def looks_like_attempting_tool_use(content)
+      # Look for patterns that suggest the LLM is trying to use a tool
+      patterns = [
+        /I('ll)? (need to|should|will|want to) use/i,
+        /Let('s| me)? use the/i,
+        /I('ll)? search for/i,
+        /I('ll)? need to (search|check|read|fetch)/i,
+        /Using the .* tool/i,
+        /Let('s| me)? (search|fetch|check|analyze)/i,
+        /I'll (call|execute|invoke|use)/i,
+        /I need to (call|execute|invoke|use)/i,
+        /Je vais (utiliser|rechercher|lire|analyser)/i, # French patterns
+        /Utilisons (le|la|les) tool/i,
+        /Je dois (chercher|utiliser|lire)/i
+      ]
+      
+      patterns.any? { |pattern| content.match?(pattern) }
     end
 
     # Process an individual chunk from the streaming response
     # @param chunk [Hash] The chunk data from the streamed response
     def process_chunk(chunk)
-      case chunk[:chunk_type]
-      when 'content'
-        # Append content to the current message
-        @current_content += chunk[:content]
-        @content_chunks_received = true
+      begin
+        case chunk[:chunk_type]
+        when 'content'
+          # Append content to the current message
+          @current_content += chunk[:content]
+          @content_chunks_received = true
 
-        # Update the database record (use update_column to avoid callbacks/broadcasts)
-        # Update the database record (still useful to save the final state)
-        # Update the database record (still useful to save the final state)
-        @current_message.update(content: @current_content)
+          # Update the database record safely
+          if @current_message
+            @current_message.update(content: @current_content)
+          else
+            Rails.logger.error("Cannot update content: current_message is nil")
+          end
 
-        # Broadcast Turbo Stream append action targeting the *inner content div* ID
-        # target_id = "#{ActionView::RecordIdentifier.dom_id(@current_message)}_content" 
-        # Turbo::StreamsChannel.broadcast_append_to(
-        #   # Use the stream name derived from the conversation model instance
-        #   @conversation.to_gid_param, 
-        #   target: target_id, # Target the inner div
-        #   content: chunk[:content] # Send the raw chunk content
-        # )
+        when 'tool_call_update'
+          # Accumulate tool call updates based on index
+          if chunk[:tool_calls].is_a?(Array)
+            chunk[:tool_calls].each do |partial_tool_call|
+              index = partial_tool_call['index']
+              next unless index.is_a?(Integer) # Ensure we have a valid index
 
-      when 'tool_call_update'
-        # Accumulate tool call updates based on index
-        chunk[:tool_calls].each do |partial_tool_call|
-          index = partial_tool_call['index']
-          next unless index.is_a?(Integer) # Ensure we have a valid index
+              @accumulated_tool_calls[index] ||= {}
+              # Use deep_merge! to combine nested structures like the 'function' hash
+              begin
+                @accumulated_tool_calls[index].deep_merge!(partial_tool_call)
+              rescue => e
+                Rails.logger.error("Error merging tool call: #{e.message}")
+                Rails.logger.debug("Partial tool call: #{partial_tool_call.inspect}")
+                Rails.logger.debug("Accumulated tool call: #{@accumulated_tool_calls[index].inspect}")
+              end
+            end
+          else
+            Rails.logger.error("Invalid tool_calls format: #{chunk[:tool_calls].inspect}")
+          end
 
-          @accumulated_tool_calls[index] ||= {}
-          # Use deep_merge! to combine nested structures like the 'function' hash
-          @accumulated_tool_calls[index].deep_merge!(partial_tool_call)
+        when 'finish'
+          @content_complete = true
+
+          # If we accumulated tool calls, process them
+          unless @accumulated_tool_calls.empty?
+            complete_tool_calls = @accumulated_tool_calls.values.sort_by { |tc| tc['index'] || 0 } # Sort by index just in case
+            Rails.logger.debug "Accumulated complete tool calls: #{complete_tool_calls.inspect}"
+
+            # Examine the *complete* tool calls for special handling
+            examine_tool_calls_for_special_cases(complete_tool_calls)
+
+            # Format the tool calls to our internal format
+            formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, complete_tool_calls)
+            Rails.logger.debug "Formatted tool calls for processing: #{formatted_tool_calls.inspect}"
+
+            process_tool_calls(formatted_tool_calls)
+          end
+          # Reset accumulator for potential follow-up calls
+          @accumulated_tool_calls = {}
+        else
+          Rails.logger.warn("Unknown chunk type: #{chunk[:chunk_type]}")
         end
-        # @current_tool_calls is no longer used here
-
-      when 'finish'
-        @content_complete = true
-
-        # If we accumulated tool calls, process them
-        unless @accumulated_tool_calls.empty?
-          complete_tool_calls = @accumulated_tool_calls.values.sort_by { |tc| tc['index'] || 0 } # Sort by index just in case
-          Rails.logger.debug "Accumulated complete tool calls: #{complete_tool_calls.inspect}"
-
-          # Examine the *complete* tool calls for special handling
-          examine_tool_calls_for_special_cases(complete_tool_calls)
-
-          # Format the tool calls to our internal format
-          formatted_tool_calls = @llm_provider.send(:format_tools_response_from_openrouter, complete_tool_calls)
-          Rails.logger.debug "Formatted tool calls for processing: #{formatted_tool_calls.inspect}"
-
-          process_tool_calls(formatted_tool_calls)
+      rescue => e
+        error_message = "Error processing chunk: #{e.message}"
+        
+        # Only log if this is a new error (avoid filling logs with repetitive errors)
+        unless error_message == @last_error
+          Rails.logger.error(error_message)
+          Rails.logger.error(e.backtrace.join("\n"))
+          Rails.logger.error("Chunk that caused error: #{chunk.inspect}")
+          @last_error = error_message
         end
-        # Reset accumulator for potential follow-up calls
-        @accumulated_tool_calls = {}
       end
     end
     
@@ -295,6 +391,27 @@ module LlmToolkit
         @special_url_input = args["url"] if args["url"].present?
         
         Rails.logger.debug("Found special case: get_url tool and a URL in another tool: #{@special_url_input}")
+      end
+
+      # Look for query-related tools
+      search_tools = tool_calls.select { |tc| 
+        name = tc.dig("function", "name")
+        ["vector_search", "text_search"].include?(name)
+      }
+
+      # Look for query in other tool calls
+      query_tools = tool_calls.select do |tc|
+        function_args = tc.dig("function", "arguments") || "{}"
+        args = begin
+          JSON.parse(function_args) rescue {}
+        end
+        tc.dig("function", "name") !~ /search/ && args["query"].present?
+      end
+
+      # If we found both a search tool and a tool with a query, log it
+      if search_tools.any? && query_tools.any?
+        query_tool = query_tools.first
+        Rails.logger.debug("Found potential search pattern: search tool and query in another tool")
       end
     end
     
@@ -336,6 +453,7 @@ module LlmToolkit
     def process_tool_calls(tool_calls)
       return false unless tool_calls.is_a?(Array) && tool_calls.any?
       
+      Rails.logger.info("Processing #{tool_calls.count} tool calls")
       dangerous_tool_encountered = false
       
       # First, see if we can find any get_url tool and tool with URL parameter
@@ -351,6 +469,25 @@ module LlmToolkit
         # Remove the URL tool from the list
         tool_calls = tool_calls.reject { |tc| tc == url_tool }
       end
+
+      # Check for search tools with empty query but another tool has a query
+      search_tools = tool_calls.select { |tc| ["vector_search", "text_search"].include?(tc["name"]) && tc["input"]["query"].blank? }
+      query_tools = tool_calls.select { |tc| tc["input"].is_a?(Hash) && tc["input"]["query"].present? && !["vector_search", "text_search"].include?(tc["name"]) }
+      
+      if search_tools.any? && query_tools.any?
+        # Get the first search tool with missing query
+        search_tool = search_tools.first
+        query_tool = query_tools.first
+        
+        # Update the search tool with the query
+        search_tool["input"]["query"] = query_tool["input"]["query"]
+        
+        # Log the change
+        Rails.logger.info("Updated #{search_tool["name"]} with query '#{query_tool["input"]["query"]}' from another tool")
+        
+        # Remove the query tool from processing
+        tool_calls = tool_calls.reject { |tc| tc == query_tool }
+      end
       
       # Now process each valid tool call
       tool_calls.each do |tool_use|
@@ -365,7 +502,10 @@ module LlmToolkit
         @processed_tool_call_ids << tool_use['id'] if tool_use['id'].present?
         
         # Skip tools with nil names
-        next if tool_use['name'].nil?
+        if tool_use['name'].nil?
+          Rails.logger.warn("Skipping tool call without a name: #{tool_use.inspect}")
+          next
+        end
         
         # Skip unknown_tool (we handle these specially)
         next if tool_use['name'] == 'unknown_tool'
@@ -428,6 +568,12 @@ module LlmToolkit
         dangerous_tool_encountered ||= dangerous_tool
       end
       
+      if @tool_results_pending
+        Rails.logger.info("Tool results are pending after processing tools")
+      else
+        Rails.logger.info("No tool results are pending after processing tools")
+      end
+      
       dangerous_tool_encountered
     end
     
@@ -436,10 +582,12 @@ module LlmToolkit
     # @return [Boolean] Success status
     def execute_tool(tool_use)
       # Find the tool class
-      Rails.logger.info("@tool_classes #{@tool_classes}")
-      Rails.logger.info("tool_use.name #{tool_use.name}")
+      Rails.logger.info("Executing tool: #{tool_use.name}")
       tool_class = @tool_classes.find { |tool| tool.definition[:name] == tool_use.name }
-      return false unless tool_class
+      unless tool_class
+        Rails.logger.warn("Tool class not found for #{tool_use.name}")
+        return false
+      end
       
       begin
         # Log the tool definition for debugging
@@ -472,6 +620,7 @@ module LlmToolkit
           content: result.to_s
         )
         
+        Rails.logger.info("Tool executed successfully: #{tool_use.name}")
         true
       rescue => e
         # Log the error
@@ -495,7 +644,7 @@ module LlmToolkit
       @conversation.messages.create!(
         role: 'assistant',
         content: '', # Start empty
-        # llm_provider_id: @llm_provider.id, # Removed provider association
+        # llm_model: @llm_model, # Removed association
         user_id: @user_id # Ensure user_id is associated if available
       )
     end

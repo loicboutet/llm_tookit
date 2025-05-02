@@ -32,18 +32,19 @@ module LlmToolkit
     end
 
     # Chat interface - send message and get response
-    # @param message [String] The message to send to the LLM
-    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param message [St^ring] The message to send to the LLM
+    # @param llm_model [LlmToolkit::LlmModel, nil] An optional specific model to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @param async [Boolean] Whether to process the request asynchronously
-    # @return [LlmToolkit::Message] The assistant's response message or nil if async
-    def chat(message, provider: nil, tools: nil, async: false)
+    # @return [LlmToolkit::Message, Boolean] The assistant's response message or true if async
+    def chat(message, llm_model: nil, tools: nil, async: false)
       # Set conversation status to working
       update(status: :working)
-      
-      # Get the LLM provider
-      llm_provider = provider || get_default_provider
-      
+
+      # Get the LLM model (and its provider)
+      target_llm_model = llm_model || get_default_llm_model
+      llm_provider = target_llm_model.llm_provider # Needed for service/job context? Revisit later.
+
       # Get the tools
       tool_classes = tools || get_default_tools
       
@@ -57,8 +58,8 @@ module LlmToolkit
       if async
         # Run in background job
         LlmToolkit::CallLlmJob.perform_later(
-          id, 
-          llm_provider.id, 
+          id,
+          target_llm_model.id, # Pass model ID
           tool_classes.map(&:name),
           self.agent_type,
           Thread.current[:current_user_id]
@@ -67,9 +68,9 @@ module LlmToolkit
         # Return true to indicate the job was queued
         return true
       else
-        # Call LLM service synchronously
+        # Call LLM service synchronously (Service needs update to accept llm_model)
         service = LlmToolkit::CallLlmWithToolService.new(
-          llm_provider: llm_provider,
+          llm_model: target_llm_model,
           conversation: self,
           tool_classes: tool_classes,
           user_id: Thread.current[:current_user_id]
@@ -85,21 +86,24 @@ module LlmToolkit
 
     # Streaming chat interface - send message and get streamed response
     # @param message [String] The message to send to the LLM
-    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param llm_model [LlmToolkit::LlmModel, nil] An optional specific model to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @param broadcast_to [String, nil] Optional channel to broadcast chunks to
     # @param async [Boolean] Whether to process the request asynchronously
     # @return [LlmToolkit::Message, Boolean] The assistant's response message or true if async
-    def stream_chat(message, provider: nil, tools: nil, broadcast_to: nil, async: true)
+    def stream_chat(message, llm_model: nil, tools: nil, broadcast_to: nil, async: true)
+      # Get the LLM model (and its provider)
+      target_llm_model = llm_model || get_default_llm_model
+      llm_provider = target_llm_model.llm_provider
+
       # Validation - currently stream_chat only works with openrouter provider
-      llm_provider = provider || get_default_provider
       unless llm_provider.provider_type == 'openrouter'
         raise ArgumentError, "stream_chat only works with OpenRouter providers"
       end
-      
+
       # Set conversation status to working
       update(status: :working)
-      
+
       # Get the tools
       tool_classes = tools || get_default_tools
       
@@ -113,20 +117,20 @@ module LlmToolkit
       if async
         # Run in background job with optional broadcast channel
         LlmToolkit::CallStreamingLlmJob.perform_later(
-          id, 
-          llm_provider.id, 
-          tool_classes.map(&:name),
-          self.agent_type,
-          Thread.current[:current_user_id],
-          broadcast_to
+          id,                               # conversation_id
+          target_llm_model.id,              # llm_model_id
+          self.agent_type,                  # role (using agent_type as the role context for the job)
+          Thread.current[:current_user_id], # user_id
+          tool_classes.map(&:name),         # tool_class_names
+          broadcast_to                      # broadcast_to
         )
-        
+
         # Return true to indicate the job was queued
         return true
       else
-        # Call streaming LLM service synchronously
+        # Call streaming LLM service synchronously (Service needs update to accept llm_model)
         service = LlmToolkit::CallStreamingLlmWithToolService.new(
-          llm_provider: llm_provider,
+          llm_model: target_llm_model,
           conversation: self,
           tool_classes: tool_classes,
           user_id: Thread.current[:current_user_id]
@@ -142,21 +146,21 @@ module LlmToolkit
 
     # Asynchronous chat interface
     # @param message [String] The message to send to the LLM
-    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param llm_model [LlmToolkit::LlmModel, nil] An optional specific model to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @return [Boolean] Success status of job queueing
-    def chat_async(message, provider: nil, tools: nil)
-      chat(message, provider: provider, tools: tools, async: true)
+    def chat_async(message, llm_model: nil, tools: nil)
+      chat(message, llm_model: llm_model, tools: tools, async: true)
     end
-    
+
     # Asynchronous streaming chat interface
     # @param message [String] The message to send to the LLM
-    # @param provider [LlmToolkit::LlmProvider, nil] An optional specific provider to use
+    # @param llm_model [LlmToolkit::LlmModel, nil] An optional specific model to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @param broadcast_to [String, nil] Optional channel to broadcast chunks to
     # @return [Boolean] Success status of job queueing
-    def stream_chat_async(message, provider: nil, tools: nil, broadcast_to: nil)
-      stream_chat(message, provider: provider, tools: tools, broadcast_to: broadcast_to, async: true)
+    def stream_chat_async(message, llm_model: nil, tools: nil, broadcast_to: nil)
+      stream_chat(message, llm_model: llm_model, tools: tools, broadcast_to: broadcast_to, async: true)
     end
 
     def working?
@@ -177,30 +181,33 @@ module LlmToolkit
 
     # Returns an array of messages formatted for LLM providers
     #
-    # @param role [Symbol] Either :coder, :reviewer, or :planner
-    # @param provider_type [String] Either 'anthropic' or 'openrouter'
+    # @param llm_model [LlmToolkit::LlmModel] The target LLM model to format history for
     #
-    # @return [Array<Hash>] Formatted messages for the specified provider
-    def history(role = :coder, provider_type: "anthropic")
-      raise ArgumentError, "Invalid role" unless [:coder, :reviewer, :planner].include?(role)
-      raise ArgumentError, "Invalid provider type" unless ["anthropic", "openrouter"].include?(provider_type)
+    # @return [Array<Hash>] Formatted messages for the specified provider type
+    def history(llm_model: nil)
+      # raise ArgumentError, "Invalid role" unless [:coder, :reviewer, :planner].include?(role) # Role removed
+      target_llm_model = llm_model || get_default_llm_model
+      provider_type = target_llm_model.llm_provider.provider_type
+      raise ArgumentError, "Invalid provider type derived from model" unless ["anthropic", "openrouter"].include?(provider_type)
 
-      role = :coder if role == :planner
+      # role = :coder if role == :planner # Role removed
       history_messages = []
-      
+
       messages.non_error.order(:created_at).each do |message|
         # Base structure for the message
         llm_message = { role: message.role }
         tool_uses = message.tool_uses
+        # Use the provider type derived from the target_llm_model for formatting
+        # current_provider_type = provider_type # Removed, use provider_type directly
 
         # --- Content Formatting ---
         if message.user_message?
-          # User messages: Handle text and attachments (OpenRouter specific)
+          # User messages: Handle text and attachments
           content_parts = []
-          # Always add text part first, even if empty, as recommended by OpenRouter
+          # Always add text part first
           content_parts << { type: "text", text: message.content.presence || "" }
 
-          if message.attachments.attached?
+          if message.attachments.attached? && provider_type == 'openrouter' # Use provider_type directly
             message.attachments.each do |attachment|
               begin
                 # Download blob data safely
@@ -249,11 +256,11 @@ module LlmToolkit
 
 
         # --- Tool Handling ---
-        if tool_uses.any? && role == :coder # Only coder role uses tools in LLM calls for now
-          case provider_type
+        # Role check removed - assume tools are always processed based on provider type
+        if tool_uses.any?
+          case provider_type # Use provider_type directly
           when "anthropic"
             # Anthropic format: Tool uses and results are part of the message content array
-            # Note: Anthropic attachment format differs, this needs specific handling if used
             history_messages += format_anthropic_message(llm_message, tool_uses)
           when "openrouter"
             # OpenRouter format: Tool uses are function calls, results are function messages
@@ -263,15 +270,24 @@ module LlmToolkit
           # Add message without tools if it has content or is a user message (even empty)
           # Skip empty non-user messages without tools
           if llm_message[:content].present? || llm_message[:role] == 'user'
-            # Ensure content is correctly formatted (string for assistant, array for user if needed)
-            if llm_message[:role] == 'assistant' && llm_message[:content].is_a?(Array)
-              # Find the text part for simple assistant messages
-              text_part = llm_message[:content].find { |part| part[:type] == 'text' }
-              llm_message[:content] = text_part ? text_part[:text] : ""
-            end
-             # OpenRouter expects user content to be an array even if just text
-            if llm_message[:role] == 'user' && provider_type == 'openrouter' && llm_message[:content].is_a?(String)
-              llm_message[:content] = [{ type: "text", text: llm_message[:content] }]
+            # Ensure content is correctly formatted based on provider type
+            if llm_message[:role] == 'assistant'
+              # Assistant content should generally be a string
+              if llm_message[:content].is_a?(Array)
+                text_part = llm_message[:content].find { |part| part[:type] == 'text' }
+                llm_message[:content] = text_part ? text_part[:text] : ""
+              end
+            elsif llm_message[:role] == 'user'
+              # User content formatting depends on provider
+              if provider_type == 'openrouter' && llm_message[:content].is_a?(String) # Use provider_type directly
+                 # OpenRouter expects user content to be an array even if just text
+                llm_message[:content] = [{ type: "text", text: llm_message[:content] }]
+              elsif provider_type == 'anthropic' && llm_message[:content].is_a?(Array) # Use provider_type directly
+                 # Anthropic expects user content to be a string unless using complex content
+                 # For simplicity here, let's assume basic text for now if it was an array
+                 text_part = llm_message[:content].find { |part| part[:type] == 'text' }
+                 llm_message[:content] = text_part ? text_part[:text] : ""
+              end
             end
             history_messages << llm_message
           end
@@ -280,21 +296,25 @@ module LlmToolkit
       end
 
       # Only add cache control headers for Anthropic
-      if provider_type == "anthropic"
+      if provider_type == "anthropic" # Use provider_type defined outside the loop
         add_cache_control(history_messages)
       end
 
       # Clean up potentially empty messages before returning
-      # For OpenRouter, user messages can have empty text if they only contain files
       return history_messages.reject do |msg|
         is_empty_non_user = msg[:role] != 'user' && msg[:content].blank? && msg[:tool_calls].blank?
-        is_empty_anthropic_user = provider_type == "anthropic" && msg[:role] == 'user' && msg[:content].is_a?(Array) && msg[:content].all? { |p| p[:text].blank? }
-        is_empty_non_user || is_empty_anthropic_user
+        # Adjust empty user message check based on provider
+        is_empty_user = if provider_type == "anthropic" # Use provider_type defined outside the loop
+                          msg[:role] == 'user' && msg[:content].blank?
+                        else # openrouter
+                          msg[:role] == 'user' && msg[:content].is_a?(Array) && msg[:content].all? { |p| p[:type] == 'text' && p[:text].blank? }
+                        end
+        is_empty_non_user || is_empty_user
       end
     end
 
     private
-    
+
     # Get the default provider from the conversable
     def get_default_provider
       if conversable.respond_to?(conversable.class.get_default_llm_provider_method)
@@ -304,6 +324,21 @@ module LlmToolkit
       end
     end
     
+    # Get the default LLM model based on the conversable's default provider
+    def get_default_llm_model
+      provider = get_default_provider
+      # Find the default model for this provider
+      model = provider.llm_models.default.first
+      # Fallback or raise error if no default model is found
+      unless model
+        # Maybe try finding *any* model for the provider?
+        model = provider.llm_models.first
+        raise "No default LLM model found for provider #{provider.name} and no fallback available." unless model
+        Rails.logger.warn "Default LLM model not found for provider #{provider.name}, using first available: #{model.name}"
+      end
+      model
+    end
+
     # Get the default tools from the conversable
     def get_default_tools
       conversable.class.default_tools

@@ -1,14 +1,23 @@
 module LlmToolkit
   class LlmProvider < ApplicationRecord
     belongs_to :owner, polymorphic: true
-    
+    has_many :llm_models, dependent: :destroy, class_name: 'LlmToolkit::LlmModel', foreign_key: 'llm_provider_id'
+
     validates :name, presence: true, uniqueness: { scope: [:owner_id, :owner_type] }
     validates :api_key, presence: true
     validates :provider_type, presence: true, inclusion: { in: %w[anthropic openrouter] }
 
     class ApiError < StandardError; end
 
-    def call(system_messages, conversation_history, tools = nil)
+    # @param system_messages [Array<Hash>] System messages for the LLM
+    # @param conversation_history [Array<Hash>] Previous messages in the conversation
+    # @param tools [Array<Hash>, nil] Tools available for the LLM
+    # @param llm_model [LlmModel, nil] The specific model to use. Defaults to the provider's default model.
+    # @return [Hash] Standardized response from the LLM API
+    def call(system_messages, conversation_history, tools = nil, llm_model: nil)
+      target_llm_model = llm_model || default_llm_model
+      raise ApiError, "No suitable LLM model found for provider #{name}" unless target_llm_model
+
       # Ensure we have valid arrays
       system_messages = Array(system_messages)
       conversation_history = Array(conversation_history)
@@ -26,12 +35,11 @@ module LlmToolkit
           end
         end
       end
-      
       case provider_type
       when 'anthropic'
-        call_anthropic(system_messages, conversation_history, tools)
+        call_anthropic(target_llm_model, system_messages, conversation_history, tools)
       when 'openrouter'
-        call_openrouter(system_messages, conversation_history, tools)
+        call_openrouter(target_llm_model, system_messages, conversation_history, tools)
       else
         raise ApiError, "Unsupported provider type: #{provider_type}"
       end
@@ -39,12 +47,21 @@ module LlmToolkit
     
     # Stream chat implementation for OpenRouter
     # Accepts a block that will be called with each chunk of the streamed response
-    def stream_chat(system_messages, conversation_history, tools = nil, &block)
+    # @param system_messages [Array<Hash>] System messages for the LLM
+    # @param conversation_history [Array<Hash>] Previous messages in the conversation
+    # @param tools [Array<Hash>, nil] Tools available for the LLM
+    # @param llm_model [LlmModel, nil] The specific model to use. Defaults to the provider's default model.
+    # @yield [Hash] Yields each chunk of the streamed response
+    # @return [Hash] Standardized final response from the LLM API stream
+    def stream_chat(system_messages, conversation_history, tools = nil, llm_model: nil, &block)
+      target_llm_model = llm_model || default_llm_model
+      raise ApiError, "No suitable LLM model found for provider #{name}" unless target_llm_model
+
       # Validate provider type - currently only supporting OpenRouter
       unless provider_type == 'openrouter'
-        raise ApiError, "Streaming is only supported for OpenRouter provider"
+        raise ApiError, "Streaming is only supported for OpenRouter provider type"
       end
-      
+
       # Ensure we have valid arrays
       system_messages = Array(system_messages)
       conversation_history = Array(conversation_history)
@@ -62,14 +79,19 @@ module LlmToolkit
           end
         end
       end
-      
       # Stream response from OpenRouter
-      stream_openrouter(system_messages, conversation_history, tools, &block)
+      stream_openrouter(target_llm_model, system_messages, conversation_history, tools, &block)
+    end
+
+    # Finds the default LlmModel for this provider
+    # @return [LlmModel, nil] The default model or nil if none is set
+    def default_llm_model
+      llm_models.default.first || llm_models.first
     end
 
     private
 
-    def call_anthropic(system_messages, conversation_history, tools = nil)
+    def call_anthropic(llm_model, system_messages, conversation_history, tools = nil)
       client = Faraday.new(url: 'https://api.anthropic.com') do |f|
         f.request :json
         f.response :json
@@ -86,12 +108,14 @@ module LlmToolkit
         Rails.logger.info("Tool #{idx+1}: #{tool[:name]} - Desc: #{tool[:description] || 'MISSING!'}")
       end
 
-      model = settings&.dig('model') || LlmToolkit.config.default_anthropic_model
+      # Use the specific model name passed in
+      model_name = llm_model.name
       max_tokens = settings&.dig('max_tokens').to_i || LlmToolkit.config.default_max_tokens
+      Rails.logger.info("Using model: #{model_name}")
       Rails.logger.info("Max tokens : #{max_tokens}")
 
       request_body = {
-        model: model,
+        model: model_name,
         system: system_messages,
         messages: conversation_history,
         tools: all_tools,
@@ -128,7 +152,7 @@ module LlmToolkit
       raise ApiError, "Network error: #{e.message}"
     end
 
-    def call_openrouter(system_messages, conversation_history, tools = nil)
+    def call_openrouter(llm_model, system_messages, conversation_history, tools = nil)
       client = Faraday.new(url: 'https://openrouter.ai/api/v1') do |f|
         f.request :json
         f.response :json
@@ -161,11 +185,14 @@ module LlmToolkit
         { role: 'system', content: system_message_content }
       ] + fixed_conversation_history
 
-      model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
+      # Use the specific model name passed in
+      model_name = llm_model.name
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
+      Rails.logger.info("Using model: #{model_name}")
+      Rails.logger.info("Max tokens : #{max_tokens}")
 
       request_body = {
-        model: model,
+        model: model_name,
         messages: messages,
         stream: false,
         usage: true,
@@ -206,8 +233,8 @@ module LlmToolkit
       Rails.logger.error("OpenRouter API error: #{e.message}")
       raise ApiError, "Network error: #{e.message}"
     end
-    
-    def stream_openrouter(system_messages, conversation_history, tools = nil, &block)
+
+    def stream_openrouter(llm_model, system_messages, conversation_history, tools = nil, &block)
       # Setup client with read_timeout increased for streaming
       client = Faraday.new(url: 'https://openrouter.ai/api/v1') do |f|
         f.request :json
@@ -241,11 +268,14 @@ module LlmToolkit
         { role: 'system', content: system_message_content }
       ] + fixed_conversation_history
 
-      model = settings&.dig('model') || LlmToolkit.config.default_openrouter_model
+      # Use the specific model name passed in
+      model_name = llm_model.name
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
+      Rails.logger.info("Using model: #{model_name}")
+      Rails.logger.info("Max tokens : #{max_tokens}")
 
       request_body = {
-        model: model,
+        model: model_name,
         messages: messages,
         stream: true, # Enable streaming
         usage: true,
@@ -329,17 +359,58 @@ module LlmToolkit
                   # Process the tool call
                   new_tool_calls.each do |tool_call|
                     # Find existing tool call or create a new entry
-                    existing_tool_call = tool_calls.find { |tc| tc['id'] == tool_call['id'] }
+                    existing_index = tool_call['index']
+                    existing_tool_call = nil
+                    
+                    # First try to find by ID
+                    if tool_call['id']
+                      existing_tool_call = tool_calls.find { |tc| tc['id'] == tool_call['id'] }
+                    end
+                    
+                    # If no matching ID found, try to find by index
+                    if existing_tool_call.nil? && existing_index.is_a?(Integer)
+                      existing_tool_call = tool_calls.find { |tc| tc['index'] == existing_index }
+                    end
                     
                     if existing_tool_call
                       # Update the existing tool call
-                      if tool_call['function'] && tool_call['function']['arguments']
-                        existing_tool_call['function']['arguments'] ||= ''
-                        existing_tool_call['function']['arguments'] += tool_call['function']['arguments']
+                      # Copy ID if provided
+                      existing_tool_call['id'] = tool_call['id'] if tool_call['id']
+                                     
+                      # Update function data
+                      if tool_call['function']
+                        existing_tool_call['function'] ||= {}
+                        
+                        # Update the function name if present
+                        if tool_call['function']['name']
+                          existing_tool_call['function']['name'] = tool_call['function']['name']
+                        end
+                        
+                        # Concatenate or initialize arguments
+                        if tool_call['function']['arguments']
+                          existing_tool_call['function']['arguments'] ||= ''
+                          existing_tool_call['function']['arguments'] += tool_call['function']['arguments']
+                        end
                       end
                     else
-                      # Add the new tool call
-                      tool_calls << tool_call
+                      # Create a new tool call entry
+                      new_entry = {
+                        'index' => existing_index,
+                        'type' => tool_call['type'] || 'function'
+                      }
+                      
+                      # Add ID if present
+                      new_entry['id'] = tool_call['id'] if tool_call['id']
+                      
+                      # Add function data if present
+                      if tool_call['function']
+                        new_entry['function'] = {}
+                        new_entry['function']['name'] = tool_call['function']['name'] if tool_call['function']['name']
+                        new_entry['function']['arguments'] = tool_call['function']['arguments'] if tool_call['function']['arguments']
+                      end
+                      
+                      # Add to the list of tool calls
+                      tool_calls << new_entry
                     end
                   end
                   
@@ -443,39 +514,166 @@ module LlmToolkit
     end
 
     def format_tools_response_from_openrouter(tool_calls)
-      return [] if tool_calls.nil?
+      return [] if tool_calls.nil? || tool_calls.empty?
       
       Rails.logger.debug("Formatting OpenRouter tool calls: #{tool_calls.inspect}")
       
-      formatted_tools = tool_calls.map do |tool_call|
-        # Extract the function data
-        function = tool_call.dig("function") || {}
+      # PHASE 1: Merge accumulated tool call fragments by index
+      # Initialize hash to store merged tool calls indexed by their position in the sequence
+      merged_by_index = {}
+      
+      # First pass: group tool calls by index and merge them
+      tool_calls.each do |tc|
+        index = tc['index']
+        next unless index.is_a?(Integer) # Skip tool calls without a valid index
         
-        # Log for debugging
-        Rails.logger.debug("Tool call function: #{function.inspect}")
+        # Initialize entry for this index if it doesn't exist
+        merged_by_index[index] ||= {
+          'id' => nil,
+          'index' => index,
+          'type' => 'function',
+          'function' => {'name' => nil, 'arguments' => ''}
+        }
         
-        # Parse the arguments - handle potential JSON parsing errors
-        input = begin
-          if function["arguments"].is_a?(String)
-            JSON.parse(function["arguments"])
-          else
-            function["arguments"] || {}
+        # Copy ID if available
+        merged_by_index[index]['id'] = tc['id'] if tc['id']
+        
+        # Copy type if available
+        merged_by_index[index]['type'] = tc['type'] if tc['type']
+        
+        # Update function data
+        if tc['function']
+          # Copy function name if available
+          if tc['function']['name']
+            merged_by_index[index]['function']['name'] = tc['function']['name']
           end
-        rescue => e
+          
+          # Concatenate arguments if available
+          if tc['function']['arguments']
+            merged_by_index[index]['function']['arguments'] += tc['function']['arguments']
+          end
+        end
+      end
+      
+      # Convert back to array
+      merged_tool_calls = merged_by_index.values
+      
+      # PHASE 2: Handle special cases and fix broken arguments
+      # Look for partial arguments strings that need to be merged
+      merged_tool_calls.each do |tc|
+        # Skip if we don't have arguments
+        next unless tc['function'] && tc['function']['arguments']
+        
+        # Fix common issues with the arguments string
+        args_str = tc['function']['arguments'].strip
+        
+        # If arguments string is empty, initialize it to empty object
+        if args_str.empty?
+          tc['function']['arguments'] = '{}'
+          next
+        end
+        
+        # Try to fix malformed JSON
+        
+        # Case 1: Arguments string is missing opening brace
+        if !args_str.start_with?('{') && !args_str.end_with?('}')
+          tc['function']['arguments'] = "{#{args_str}}"
+        elsif !args_str.start_with?('{')
+          tc['function']['arguments'] = "{#{args_str}"
+        elsif !args_str.end_with?('}')
+          tc['function']['arguments'] = "#{args_str}}"
+        end
+        
+        # Case 2: Try to detect and complete partial "query" format
+        # Common pattern: "y": "something"
+        if args_str.match(/^y["']?\s*:\s*["']/)
+          tc['function']['arguments'] = "{\"quer#{args_str}}"
+        end
+        
+        # Case 3: Handle unclosed strings
+        # This is hard to fix perfectly, but we can try a simple approach
+        if args_str.count('"') % 2 == 1
+          tc['function']['arguments'] = "#{args_str}\""
+        end
+      end
+      
+      # PHASE 3: Parse arguments into proper input hash
+      # Format each tool call to the expected structure
+      formatted_tool_calls = merged_tool_calls.map do |tc|
+        function = tc['function'] || {}
+        
+        # Check if this tool has all required parts
+        has_id = tc['id'].present?
+        has_name = function['name'].present?
+        
+        # Skip empty or invalid tool calls
+        next nil if !has_name && function['arguments'].blank?
+        
+        # Try to parse the arguments string into a hash
+        input = begin
+          if function['arguments'].is_a?(String)
+            # If the arguments string looks like JSON, parse it
+            if function['arguments'].start_with?('{') && function['arguments'].end_with?('}')
+              JSON.parse(function['arguments'])
+            else
+              # If it doesn't look like JSON but has key-value pattern, try to reconstruct
+              arg_str = function['arguments'].strip
+              if arg_str.include?(':')
+                # Extract key and value based on a simple key:value pattern
+                key, value = arg_str.split(':', 2).map(&:strip)
+                
+                # Remove quotes from key if present
+                key = key.gsub(/["']/, '')
+                
+                # If value looks like a string (has quotes), strip them
+                if value.start_with?('"') && value.end_with?('"')
+                  value = value[1..-2]
+                elsif value.start_with?("'") && value.end_with?("'")
+                  value = value[1..-2]
+                # If it looks like a number, convert it
+                elsif value =~ /^\d+$/
+                  value = value.to_i
+                elsif value =~ /^\d+\.\d+$/
+                  value = value.to_f
+                end
+                
+                {key => value}
+              else
+                # Can't parse it, return it as a raw string
+                {'raw_input' => arg_str}
+              end
+            end
+          else
+            # Not a string, return empty hash
+            {}
+          end
+        rescue JSON::ParserError => e
           Rails.logger.error("Error parsing tool arguments: #{e.message}")
           {}
+        rescue => e
+          Rails.logger.error("Unknown error parsing arguments: #{e.message}")
+          {}
+        end
+        
+        # Handle special case: vector_search vs text_search
+        # If name is missing but we have query parameter, use appropriate search tool
+        if !has_name && input["query"].present?
+          # Choose which search to use based on context or default to vector_search
+          function['name'] = "vector_search"
         end
         
         # Return the standardized format expected by our system
         {
-          "name" => function["name"],
+          "name" => function['name'],
           "input" => input,
-          "id" => tool_call["id"]
+          "id" => tc['id']
         }
-      end
+      end.compact # Remove nils
       
-      Rails.logger.debug("Formatted tool calls: #{formatted_tools.inspect}")
-      formatted_tools
+      # Log the result
+      Rails.logger.debug("Formatted tool calls: #{formatted_tool_calls.inspect}")
+      
+      formatted_tool_calls
     end
 
     def format_tools_for_openrouter(tools)

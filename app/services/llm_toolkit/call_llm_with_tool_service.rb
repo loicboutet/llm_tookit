@@ -1,16 +1,17 @@
 module LlmToolkit
   class CallLlmWithToolService
-    attr_reader :llm_provider, :conversation, :conversable, :role, :tools, :user_id, :tool_classes
+    attr_reader :llm_model, :llm_provider, :conversation, :conversable, :role, :tools, :user_id, :tool_classes
 
     # Initialize the service with necessary parameters
     #
-    # @param llm_provider [LlmProvider] The provider to use for LLM calls
+    # @param llm_model [LlmModel] The model to use for LLM calls
     # @param conversation [Conversation] The conversation to update
     # @param tool_classes [Array<Class>] Optional tool classes to use
     # @param role [Symbol] Role to use for conversation history
     # @param user_id [Integer] ID of the user making the request
-    def initialize(llm_provider:, conversation:, tool_classes: [], role: nil, user_id: nil)
-      @llm_provider = llm_provider
+    def initialize(llm_model:, conversation:, tool_classes: [], role: nil, user_id: nil)
+      @llm_model = llm_model
+      @llm_provider = @llm_model.llm_provider # Derive provider from model
       @conversation = conversation
       @conversable = conversation.conversable
       @role = role || conversation.agent_type.to_sym
@@ -29,8 +30,8 @@ module LlmToolkit
     #
     # @return [Boolean] Success status
     def call
-      # Return if LLM provider is missing
-      return false unless @llm_provider
+      # Return if LLM model or provider is missing
+      return false unless @llm_model && @llm_provider
 
       begin
         # Set conversation to working status
@@ -111,11 +112,13 @@ module LlmToolkit
                      []
                    end
 
-      # Get conversation history
-      conv_history = @conversation.history(@role, provider_type: @llm_provider.provider_type)
+      # Get conversation history, formatted for the specific model's provider type
+      conv_history = @conversation.history(@role, llm_model: @llm_model)
 
-      # Call the LLM provider
+      # Call the LLM provider (Provider's call method will need refactoring later)
+      # For now, it still uses settings/config, but we pass the context
       @llm_provider.call(sys_prompt, conv_history, @tools)
+      # TODO: Refactor LlmProvider#call to accept llm_model details (e.g., model name)
     end
 
     # Create a message with the LLM response
@@ -126,6 +129,7 @@ module LlmToolkit
       @conversation.messages.create!(
         role: 'assistant',
         content: content,
+        # llm_model: @llm_model, # Removed association
         user_id: @user_id
       )
     end

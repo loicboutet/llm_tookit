@@ -5,35 +5,42 @@ module LlmToolkit
     # Process streaming LLM requests asynchronously
     #
     # @param conversation_id [Integer] The ID of the conversation to process
-    # @param llm_provider_id [Integer] The ID of the LLM provider to use
-    # @param llm_provider_id [Integer] The ID of the LLM provider to use
-    # @param assistant_message_id [Integer] The ID of the pre-created empty assistant message
-    # @param tool_class_names [Array<String>] Names of tool classes to use
-    # @param role [Symbol, String] Role to use for conversation history
+    # @param llm_model_id [Integer] The ID of the LLM model to use
     # @param user_id [Integer] ID of the user making the request
-    def perform(conversation_id, llm_provider_id, assistant_message_id, tool_class_names = [], role = nil, user_id = nil)
-      # Retrieve the conversation and provider
+    # @param tool_class_names [Array<String>] Names of tool classes to use (default: [])
+    # @param broadcast_to [String, nil] Optional channel for broadcasting updates (default: nil)
+    def perform(conversation_id, llm_model_id, user_id, tool_class_names = [], broadcast_to = nil)
+      # Retrieve the conversation and model
       conversation = LlmToolkit::Conversation.find_by(id: conversation_id)
-      llm_provider = LlmToolkit::LlmProvider.find_by(id: llm_provider_id)
-      # Find the pre-created assistant message
-      assistant_message = LlmToolkit::Message.find_by(id: assistant_message_id)
-      # Ensure all necessary records are found
-      return unless conversation && llm_provider && assistant_message
-      
+      llm_model = LlmToolkit::LlmModel.find_by(id: llm_model_id)
+
+      return unless conversation && llm_model
+
+      # Create the initial empty assistant message
+      # Note: We no longer associate it with the llm_model here
+      assistant_message = conversation.messages.create!(
+        role: 'assistant', # Default to assistant role
+        content: '', # Start empty
+        user_id: user_id # Track who initiated
+      )
+
       # Set up Thread.current[:current_user_id] for tools that need it
       Thread.current[:current_user_id] = user_id
 
-      # Convert tool class names to actual classes
-      tool_classes = tool_class_names.map { |class_name| class_name.constantize rescue nil }.compact
-      
-      # Create the streaming service, passing the assistant message
+      # Ensure tool_class_names is an array before mapping
+      safe_tool_class_names = Array(tool_class_names)
+      tool_classes = safe_tool_class_names.map { |class_name| class_name.constantize rescue nil }.compact
+
+      # Create the streaming service, passing the llm_model and the new assistant message
+      # (Service needs update to accept llm_model)
       service = LlmToolkit::CallStreamingLlmWithToolService.new(
-        llm_provider: llm_provider,
+        llm_model: llm_model,
         conversation: conversation,
-        assistant_message: assistant_message, # Pass the message object
+        assistant_message: assistant_message, # Pass the newly created message object
         tool_classes: tool_classes,
-        role: role&.to_sym,
-        user_id: user_id
+        # role: role&.to_sym, # Role removed
+        user_id: user_id,
+        broadcast_to: broadcast_to # Pass the broadcast channel if provided
       )
 
       # Process the streaming LLM call
@@ -45,11 +52,12 @@ module LlmToolkit
       # Update conversation status to resting on error
       conversation&.update(status: :resting)
       
-      # Update the pre-created message with error details
+      # Update the assistant message with error details
       assistant_message&.update(
         content: "Error processing your streaming request: #{e.message}",
-        is_error: true,
-        user_id: user_id
+        is_error: true
+        # user_id is already set during creation
+        # llm_model_id is no longer relevant here
       )
       
       # Note: Error broadcasting via custom channel removed. 
