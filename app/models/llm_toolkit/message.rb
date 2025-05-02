@@ -100,6 +100,24 @@ module LlmToolkit
       images.attached?
     end
     
+    # Provides a user-friendly description of the finish_reason
+    def finish_reason_description
+      case finish_reason
+      when 'stop'
+        'Model completed response normally'
+      when 'length'
+        'Response cut off due to token limit'
+      when 'tool_calls'
+        'Model called tools to complete the task'
+      when 'content_filter'
+        'Content was filtered due to safety concerns'
+      when nil
+        'No finish reason provided'
+      else
+        finish_reason.to_s.humanize
+      end
+    end
+    
     private
     
     # Broadcasts an update to the conversation's usage stats frame

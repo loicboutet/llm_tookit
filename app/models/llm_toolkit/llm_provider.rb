@@ -302,6 +302,7 @@ module LlmToolkit
       model_name = nil
       usage_info = nil
       content_complete = false
+      finish_reason = nil
 
       response = client.post('chat/completions') do |req|
         req.headers['Content-Type'] = 'application/json'
@@ -349,7 +350,7 @@ module LlmToolkit
                   accumulated_content += new_content
                   
                   # Pass the new content to the block
-                  yield({ 'chunk_type': 'content', 'content': new_content }) if block_given?
+                  yield({ chunk_type: 'content', content: new_content }) if block_given?
                 end
                 
                 # Check for a tool call in the delta
@@ -415,15 +416,16 @@ module LlmToolkit
                   end
                   
                   # Signal that we have a tool call update
-                  yield({ 'chunk_type': 'tool_call_update', 'tool_calls': tool_calls }) if block_given?
+                  yield({ chunk_type: 'tool_call_update', tool_calls: tool_calls }) if block_given?
                 end
                 
                 # Check for finish_reason (signals end of content or tool call)
                 if first_choice['finish_reason']
                   content_complete = true
+                  finish_reason = first_choice['finish_reason']
                   
                   # If we have a non-nil finish reason, the response is complete
-                  yield({ 'chunk_type': 'finish', 'finish_reason': first_choice['finish_reason'] }) if block_given?
+                  yield({ chunk_type: 'finish', finish_reason: finish_reason }) if block_given?
                 end
               end
             rescue JSON::ParserError => e
@@ -450,7 +452,8 @@ module LlmToolkit
         'stop_reason' => content_complete ? 'stop' : nil,
         'stop_sequence' => nil,
         'tool_calls' => formatted_tool_calls || [],
-        'usage' => usage_info
+        'usage' => usage_info,
+        'finish_reason' => finish_reason
       }
     rescue Faraday::Error => e
       Rails.logger.error("OpenRouter API streaming error: #{e.message}")
@@ -469,7 +472,8 @@ module LlmToolkit
         'stop_reason' => response['stop_reason'],
         'stop_sequence' => response['stop_sequence'],
         'tool_calls' => tool_calls || [],
-        'usage' => response['usage']
+        'usage' => response['usage'],
+        'finish_reason' => response['stop_reason']
       }
     end
 
@@ -504,7 +508,8 @@ module LlmToolkit
         'stop_reason' => choice['finish_reason'],
         'stop_sequence' => nil,
         'tool_calls' => tool_calls,
-        'usage' => response['usage']
+        'usage' => response['usage'],
+        'finish_reason' => choice['finish_reason']
       }
       
       # Log the standardized response for debugging

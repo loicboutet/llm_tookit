@@ -65,11 +65,12 @@ module LlmToolkit
       
       # For tool calls, the content may be empty, so we should handle that gracefully
       content = response['content']
+      finish_reason = response['finish_reason']
       
       # Create an assistant message with the response content
       # Only create if content is not empty
       message = if content.present?
-                  create_message(content)
+                  create_message(content, finish_reason)
                 else
                   # For tool calls with null content, we'll get the message from the first tool use
                   # This handles the OpenRouter responses where content is null but tool_calls is present
@@ -79,7 +80,7 @@ module LlmToolkit
       # Process tool calls in a loop until done or waiting for approval
       while response['tool_calls'].present?
         # We need a message to attach tool uses to
-        message ||= create_message("")
+        message ||= create_message("", finish_reason)
         
         # Process tool uses and check if dangerous tools were encountered
         dangerous_tool_encountered = process_tool_uses(response, message)
@@ -91,12 +92,15 @@ module LlmToolkit
         response = call_llm
         break unless response
         
+        # Get the new finish_reason
+        finish_reason = response['finish_reason']
+        
         # Reset message for the next iteration
         message = nil
         
         # Create a new message with the response content if present
         if response['content'].present?
-          message = create_message(response['content'])
+          message = create_message(response['content'], finish_reason)
         end
       end
     end
@@ -124,11 +128,13 @@ module LlmToolkit
     # Create a message with the LLM response
     #
     # @param content [String] The content of the message
+    # @param finish_reason [String, nil] The reason why the LLM stopped generating
     # @return [Message] The created message
-    def create_message(content)
+    def create_message(content, finish_reason = nil)
       @conversation.messages.create!(
         role: 'assistant',
         content: content,
+        finish_reason: finish_reason,
         # llm_model: @llm_model, # Removed association
         user_id: @user_id
       )

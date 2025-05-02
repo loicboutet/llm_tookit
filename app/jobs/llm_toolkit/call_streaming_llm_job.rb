@@ -44,7 +44,14 @@ module LlmToolkit
       )
 
       # Process the streaming LLM call
-      service.call
+      response = service.call
+
+      # If we have a finish_reason in the response and it's not already set on the message,
+      # update the message with the finish_reason
+      if response.is_a?(Hash) && response['finish_reason'].present? && assistant_message.finish_reason.blank?
+        assistant_message.update(finish_reason: response['finish_reason'])
+        Rails.logger.info("Updated message finish_reason from final response: #{response['finish_reason']}")
+      end
     rescue => e
       Rails.logger.error("Error in CallStreamingLlmJob: #{e.message}")
       Rails.logger.error(e.backtrace.join("\n"))

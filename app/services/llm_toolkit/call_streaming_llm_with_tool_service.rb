@@ -42,6 +42,7 @@ module LlmToolkit
       @processed_tool_call_ids = Set.new
       @special_url_input = nil
       @tool_results_pending = false
+      @finish_reason = nil
       
       # Add followup count to prevent infinite loops
       @followup_count = 0
@@ -124,6 +125,13 @@ module LlmToolkit
         )
       end
 
+      # Update the finish_reason from the final response if we don't have one from streaming
+      if final_response && final_response['finish_reason'] && @finish_reason.nil?
+        @finish_reason = final_response['finish_reason']
+        @current_message.update(finish_reason: @finish_reason)
+        Rails.logger.info("Updated finish_reason from final response: #{@finish_reason}")
+      end
+
       # Final processing happens within the 'finish' chunk handler now.
       # Tool calls from the final_response might be redundant if streaming worked correctly,
       # but we keep this block as a fallback, although it might need review later
@@ -198,6 +206,7 @@ module LlmToolkit
       @content_complete = false
       @content_chunks_received = false
       @tool_results_pending = false
+      @finish_reason = nil
       
       # Get updated conversation history with tool results
       sys_prompt = if @conversable.respond_to?(:generate_system_messages)
@@ -232,6 +241,13 @@ module LlmToolkit
             completion_tokens: usage['completion_tokens'].to_i,
             api_total_tokens: usage['total_tokens'].to_i # Use renamed column
           )
+        end
+
+        # Update the finish_reason from the final response if we don't have one from streaming
+        if final_response && final_response['finish_reason'] && @finish_reason.nil?
+          @finish_reason = final_response['finish_reason']
+          @current_message.update(finish_reason: @finish_reason)
+          Rails.logger.info("Updated finish_reason from final response: #{@finish_reason}")
         end
 
         # Handle any tool calls in the final response (if we didn't process them during streaming)
@@ -332,6 +348,15 @@ module LlmToolkit
 
         when 'finish'
           @content_complete = true
+          
+          # Extract finish_reason from the chunk if available
+          if chunk[:finish_reason].present?
+            @finish_reason = chunk[:finish_reason]
+            Rails.logger.info("Extracted finish_reason from chunk: #{@finish_reason}")
+            
+            # Update the message with the finish_reason
+            @current_message.update(finish_reason: @finish_reason) if @current_message
+          end
 
           # If we accumulated tool calls, process them
           unless @accumulated_tool_calls.empty?
