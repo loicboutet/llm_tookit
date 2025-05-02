@@ -46,7 +46,7 @@ module LlmToolkit
       
       # Add followup count to prevent infinite loops
       @followup_count = 0
-      @max_followups = 10 # Safety limit
+      @max_followups = 100 # Safety limit
 
       # Track the last error to avoid repeated error messages
       @last_error = nil
