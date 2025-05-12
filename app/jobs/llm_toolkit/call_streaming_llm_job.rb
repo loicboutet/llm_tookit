@@ -16,12 +16,12 @@ module LlmToolkit
 
       return unless conversation && llm_model
 
-      # Create the initial empty assistant message
-      # Note: We no longer associate it with the llm_model here
+      # Create the initial empty assistant message with associated llm_model
       assistant_message = conversation.messages.create!(
         role: 'assistant', # Default to assistant role
         content: '', # Start empty
-        user_id: user_id # Track who initiated
+        user_id: user_id, # Track who initiated
+        llm_model: llm_model # Associate with the LLM model
       )
 
       # Set up Thread.current[:current_user_id] for tools that need it
@@ -32,13 +32,11 @@ module LlmToolkit
       tool_classes = safe_tool_class_names.map { |class_name| class_name.constantize rescue nil }.compact
 
       # Create the streaming service, passing the llm_model and the new assistant message
-      # (Service needs update to accept llm_model)
       service = LlmToolkit::CallStreamingLlmWithToolService.new(
         llm_model: llm_model,
         conversation: conversation,
         assistant_message: assistant_message, # Pass the newly created message object
         tool_classes: tool_classes,
-        # role: role&.to_sym, # Role removed
         user_id: user_id,
         broadcast_to: broadcast_to # Pass the broadcast channel if provided
       )
@@ -63,12 +61,7 @@ module LlmToolkit
       assistant_message&.update(
         content: "Error processing your streaming request: #{e.message}",
         is_error: true
-        # user_id is already set during creation
-        # llm_model_id is no longer relevant here
       )
-      
-      # Note: Error broadcasting via custom channel removed. 
-      # Consider adding Turbo Stream error broadcasting if needed.
     end
   end
 end

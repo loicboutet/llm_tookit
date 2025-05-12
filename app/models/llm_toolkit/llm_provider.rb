@@ -307,7 +307,7 @@ module LlmToolkit
       response = client.post('chat/completions') do |req|
         req.headers['Content-Type'] = 'application/json'
         req.headers['Authorization'] = "Bearer #{api_key}"
-        req.headers['HTTP-Referer'] = LlmToolkit.config.referer_url
+        #req.headers['HTTP-Referer'] = LlmToolkit.config.referer_url
         req.headers['X-Title'] = 'Development Environment'
         req.body = request_body.to_json
         req.options.on_data = proc do |chunk, size, env|

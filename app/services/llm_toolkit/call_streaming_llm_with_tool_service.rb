@@ -110,7 +110,7 @@ module LlmToolkit
       # Call the LLM provider with streaming and handle each chunk
       # (Provider's stream_chat method will need refactoring later)
       # TODO: Refactor LlmProvider#stream_chat to accept llm_model details
-      final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools) do |chunk|
+      final_response = @llm_provider.stream_chat(sys_prompt, conv_history, @tools, llm_model:@llm_model) do |chunk|
         process_chunk(chunk)
       end
 
