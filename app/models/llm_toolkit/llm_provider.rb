@@ -272,7 +272,7 @@ module LlmToolkit
       model_name = llm_model.name
  #     max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
       Rails.logger.info("Using model: #{model_name}")
-      Rails.logger.info("Max tokens : #{max_tokens}")
+ #     Rails.logger.info("Max tokens : #{max_tokens}")
 
       request_body = {
         model: model_name,
