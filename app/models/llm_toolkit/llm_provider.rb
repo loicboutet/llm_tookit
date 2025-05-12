@@ -270,7 +270,7 @@ module LlmToolkit
 
       # Use the specific model name passed in
       model_name = llm_model.name
-      max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
+ #     max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
       Rails.logger.info("Using model: #{model_name}")
       Rails.logger.info("Max tokens : #{max_tokens}")
 
@@ -279,7 +279,7 @@ module LlmToolkit
         messages: messages,
         stream: true, # Enable streaming
         usage: true,
-        max_tokens: max_tokens
+  #      max_tokens: max_tokens
       }
 
       tools = Array(tools)
