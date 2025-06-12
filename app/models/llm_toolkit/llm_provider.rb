@@ -1,5 +1,8 @@
 module LlmToolkit
   class LlmProvider < ApplicationRecord
+    include SystemMessageFormatter
+    include OpenrouterHandler
+    
     belongs_to :owner, polymorphic: true
     has_many :llm_models, dependent: :destroy, class_name: 'LlmToolkit::LlmModel', foreign_key: 'llm_provider_id'
 
@@ -24,17 +27,8 @@ module LlmToolkit
       tools = Array(tools)
       
       # Validate tools format
-      tools.each do |tool|
-        unless tool.is_a?(Hash) && tool[:name].present? && tool[:description].present?
-          Rails.logger.warn "Invalid tool format detected: #{tool.inspect}"
-          
-          # Provide a default description if missing
-          if tool[:name].present? && tool[:description].nil?
-            tool[:description] = "Tool for #{tool[:name]}"
-            Rails.logger.info "Added default description for tool: #{tool[:name]}"
-          end
-        end
-      end
+      validate_tools_format(tools)
+      
       case provider_type
       when 'anthropic'
         call_anthropic(target_llm_model, system_messages, conversation_history, tools)
@@ -68,17 +62,8 @@ module LlmToolkit
       tools = Array(tools)
       
       # Validate tools format
-      tools.each do |tool|
-        unless tool.is_a?(Hash) && tool[:name].present? && tool[:description].present?
-          Rails.logger.warn "Invalid tool format detected: #{tool.inspect}"
-          
-          # Provide a default description if missing
-          if tool[:name].present? && tool[:description].nil?
-            tool[:description] = "Tool for #{tool[:name]}"
-            Rails.logger.info "Added default description for tool: #{tool[:name]}"
-          end
-        end
-      end
+      validate_tools_format(tools)
+      
       # Stream response from OpenRouter
       stream_openrouter(target_llm_model, system_messages, conversation_history, tools, &block)
     end
@@ -90,6 +75,20 @@ module LlmToolkit
     end
 
     private
+
+    def validate_tools_format(tools)
+      tools.each do |tool|
+        unless tool.is_a?(Hash) && tool[:name].present? && tool[:description].present?
+          Rails.logger.warn "Invalid tool format detected: #{tool.inspect}"
+          
+          # Provide a default description if missing
+          if tool[:name].present? && tool[:description].nil?
+            tool[:description] = "Tool for #{tool[:name]}"
+            Rails.logger.info "Added default description for tool: #{tool[:name]}"
+          end
+        end
+      end
+    end
 
     def call_anthropic(llm_model, system_messages, conversation_history, tools = nil)
       client = Faraday.new(url: 'https://api.anthropic.com') do |f|
@@ -114,16 +113,19 @@ module LlmToolkit
       Rails.logger.info("Using model: #{model_name}")
       Rails.logger.info("Max tokens : #{max_tokens}")
 
+      # Format system messages for Anthropic (simple text format)
+      system_content = format_system_messages_for_anthropic(system_messages)
+
       request_body = {
         model: model_name,
-        system: system_messages,
+        system: system_content,
         messages: conversation_history,
         tools: all_tools,
         max_tokens: max_tokens
       }
       request_body[:tool_choice] = {type: "auto"} if tools.present?
     
-      Rails.logger.info("System Messages: #{system_messages}")
+      Rails.logger.info("System Messages: #{system_content}")
       Rails.logger.info("Conversation History: #{conversation_history}")
       
       # Detailed request logging
@@ -150,335 +152,6 @@ module LlmToolkit
     rescue Faraday::Error => e
       Rails.logger.error("Anthropic API error: #{e.message}")
       raise ApiError, "Network error: #{e.message}"
-    end
-
-    def call_openrouter(llm_model, system_messages, conversation_history, tools = nil)
-      client = Faraday.new(url: 'https://openrouter.ai/api/v1') do |f|
-        f.request :json
-        f.response :json
-        f.adapter Faraday.default_adapter
-        f.options.timeout = 300
-        f.options.open_timeout = 10
-      end
-
-      # Ensure system_messages is properly formatted and not nil
-      system_message_content = if system_messages.present?
-                                 system_messages.map { |msg| msg.is_a?(Hash) ? msg[:text] : msg.to_s }.join("\n")
-                               else
-                                 "You are an AI assistant."
-                               end
-
-      # Fix the nested content structure for conversation history
-      fixed_conversation_history = Array(conversation_history).map do |msg|
-        # If content is an array of objects with 'type' and 'text' properties, convert to string
-        if msg[:content].is_a?(Array) && msg[:content].all? { |item| item.is_a?(Hash) && item[:type] && item[:text] }
-          # Extract just the text from each content item
-          text_content = msg[:content].map { |item| item[:text] }.join("\n")
-          msg.merge(content: text_content)
-        else
-          # Keep as-is if already a string or other format
-          msg
-        end
-      end
-
-      messages = [
-        { role: 'system', content: system_message_content }
-      ] + fixed_conversation_history
-
-      # Use the model_id for API calls, not the display name
-      model_name = llm_model.model_id.presence || llm_model.name
-      max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
-      Rails.logger.info("Using model: #{model_name}")
-      Rails.logger.info("Max tokens : #{max_tokens}")
-
-      request_body = {
-        model: model_name,
-        messages: messages,
-        stream: false,
-        usage: true,
-        max_tokens: max_tokens
-      }
-
-      tools = Array(tools)
-      if tools.present?
-        request_body[:tools] = format_tools_for_openrouter(tools)
-       # request_body[:tool_choice] = { type: 'auto' }
-      end
-
-      Rails.logger.info("OpenRouter Request - Messages: #{messages}")
-      Rails.logger.info("OpenRouter Request - Tools: #{request_body[:tools] || []}")
-      
-      # Detailed request logging
-      if Rails.env.development?
-        Rails.logger.debug "OPENROUTER REQUEST BODY: #{JSON.pretty_generate(request_body)}"
-      end
-
-      response = client.post('chat/completions') do |req|
-        req.headers['Content-Type'] = 'application/json'
-        req.headers['Authorization'] = "Bearer #{api_key}"
-        req.headers['HTTP-Referer'] = LlmToolkit.config.referer_url
-        req.headers['X-Title'] = 'Development Environment'
-        req.body = request_body.to_json
-      end
-
-      if response.success?
-        Rails.logger.info("LlmProvider - Received successful response from OpenRouter API:")
-        Rails.logger.info(response.body)
-        standardize_openrouter_response(response.body)
-      else
-        Rails.logger.error("OpenRouter API error: #{response.body}")
-        raise ApiError, "API error: #{response.body['error']&.[]('message') || response.body}"
-      end
-    rescue Faraday::Error => e
-      Rails.logger.error("OpenRouter API error: #{e.message}")
-      raise ApiError, "Network error: #{e.message}"
-    end
-
-    def stream_openrouter(llm_model, system_messages, conversation_history, tools = nil, &block)
-      # Setup client with read_timeout increased for streaming
-      client = Faraday.new(url: 'https://openrouter.ai/api/v1') do |f|
-        f.request :json
-        # Don't use f.response :json as we need the raw response for streaming
-        f.adapter Faraday.default_adapter
-        f.options.timeout = 600 # Longer timeout for streaming
-        f.options.open_timeout = 10
-      end
-
-      # Ensure system_messages is properly formatted and not nil
-      system_message_content = if system_messages.present?
-                                 system_messages.map { |msg| msg.is_a?(Hash) ? msg[:text] : msg.to_s }.join("\n")
-                               else
-                                 "You are an AI assistant."
-                               end
-
-      # Fix the nested content structure for conversation history
-      fixed_conversation_history = Array(conversation_history).map do |msg|
-        # If content is an array of objects with 'type' and 'text' properties, convert to string
-        if msg[:content].is_a?(Array) && msg[:content].all? { |item| item.is_a?(Hash) && item[:type] && item[:text] }
-          # Extract just the text from each content item
-          text_content = msg[:content].map { |item| item[:text] }.join("\n")
-          msg.merge(content: text_content)
-        else
-          # Keep as-is if already a string or other format
-          msg
-        end
-      end
-
-      messages = [
-        { role: 'system', content: system_message_content }
-      ] + fixed_conversation_history
-
-      # Use the model_id for API calls, not the display name
-      model_name = llm_model.model_id.presence || llm_model.name
- #     max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
-      Rails.logger.info("Using model: #{model_name}")
- #     Rails.logger.info("Max tokens : #{max_tokens}")
-
-      request_body = {
-        model: model_name,
-        messages: messages,
-        stream: true, # Enable streaming
-        usage: true,
-  #      max_tokens: max_tokens
-      }
-
-      tools = Array(tools)
-      if tools.present?
-        request_body[:tools] = format_tools_for_openrouter(tools)
-        # request_body[:tool_choice] = { type: 'auto' }
-      end
-
-      Rails.logger.info("OpenRouter Streaming Request - Messages count: #{messages.size}")
-      Rails.logger.info("OpenRouter Streaming Request - Tools count: #{request_body[:tools]&.size || 0}")
-      
-      # Detailed request logging
-      if Rails.env.development?
-        Rails.logger.debug "OPENROUTER STREAMING REQUEST BODY: #{JSON.pretty_generate(request_body)}"
-      end
-
-      # Initialize variables to track the streaming response
-      accumulated_content = ""
-      tool_calls = []
-      model_name = nil
-      usage_info = nil
-      content_complete = false
-      finish_reason = nil
-
-      response = client.post('chat/completions') do |req|
-        req.headers['Content-Type'] = 'application/json'
-        req.headers['Authorization'] = "Bearer #{api_key}"
-        #req.headers['HTTP-Referer'] = LlmToolkit.config.referer_url
-        req.headers['X-Title'] = 'Development Environment'
-        req.body = request_body.to_json
-        req.options.on_data = proc do |chunk, size, env|
-          # Force chunk encoding to UTF-8 to prevent Encoding::CompatibilityError
-          chunk.force_encoding('UTF-8')
-          next if chunk.strip.empty?
-          
-          # Remove 'data: ' prefix from each line and skip comment lines
-          chunk.each_line do |line|
-            # Ensure line is also UTF-8, though force_encoding on chunk should handle this
-            trimmed_line = line.strip 
-            next if trimmed_line.empty? || trimmed_line.start_with?(':')
-            
-            # Check for [DONE] marker
-            if trimmed_line == 'data: [DONE]'
-              content_complete = true
-              next
-            end
-            
-            # Extract the JSON part from the SSE line
-            json_str = trimmed_line.sub(/^data: /, '')
-            
-            begin
-              # Parse the chunk JSON
-              json_data = JSON.parse(json_str)
-              Rails.logger.info("OpenRouter chunk : #{json_data}")
-
-              # Check if this chunk contains an error - SIMPLE ERROR HANDLING
-              if json_data['error'].present?
-                error_message = json_data['error']['message']
-                
-                # Create user-friendly message for common errors
-                friendly_message = case error_message
-                when /no endpoints found that support tool use/i
-                  "Le modèle sélectionné ne prend pas en charge les outils avancés."
-                when /rate limit/i, /too many requests/i
-                  "Le service est temporairement surchargé. Veuillez réessayer dans quelques instants."
-                when /model .* not found/i
-                  "Le modèle demandé n'est pas disponible. Essayez de sélectionner un autre modèle."
-                else
-                  "Une erreur s'est produite: #{error_message}"
-                end
-                
-                # Yield an error chunk
-                yield({ chunk_type: 'error', error_message: friendly_message }) if block_given?
-                next
-              end
-
-              # Record model name if not yet set
-              model_name ||= json_data['model']
-              
-              # Check if this is a tool call chunk
-              first_choice = json_data['choices']&.first
-              if first_choice
-                # Record usage if present (typically in the final chunk)
-                usage_info = json_data['usage'] if json_data['usage']
-                
-                # Check for delta for text content
-                if first_choice['delta'] && first_choice['delta']['content']
-                  new_content = first_choice['delta']['content']
-                  accumulated_content += new_content
-                  
-                  # Pass the new content to the block
-                  yield({ chunk_type: 'content', content: new_content }) if block_given?
-                end
-                
-                # Check for a tool call in the delta
-                if first_choice['delta'] && first_choice['delta']['tool_calls']
-                  new_tool_calls = first_choice['delta']['tool_calls']
-                  
-                  # Process the tool call
-                  new_tool_calls.each do |tool_call|
-                    # Find existing tool call or create a new entry
-                    existing_index = tool_call['index']
-                    existing_tool_call = nil
-                    
-                    # First try to find by ID
-                    if tool_call['id']
-                      existing_tool_call = tool_calls.find { |tc| tc['id'] == tool_call['id'] }
-                    end
-                    
-                    # If no matching ID found, try to find by index
-                    if existing_tool_call.nil? && existing_index.is_a?(Integer)
-                      existing_tool_call = tool_calls.find { |tc| tc['index'] == existing_index }
-                    end
-                    
-                    if existing_tool_call
-                      # Update the existing tool call
-                      # Copy ID if provided
-                      existing_tool_call['id'] = tool_call['id'] if tool_call['id']
-                                     
-                      # Update function data
-                      if tool_call['function']
-                        existing_tool_call['function'] ||= {}
-                        
-                        # Update the function name if present
-                        if tool_call['function']['name']
-                          existing_tool_call['function']['name'] = tool_call['function']['name']
-                        end
-                        
-                        # Concatenate or initialize arguments
-                        if tool_call['function']['arguments']
-                          existing_tool_call['function']['arguments'] ||= ''
-                          existing_tool_call['function']['arguments'] += tool_call['function']['arguments']
-                        end
-                      end
-                    else
-                      # Create a new tool call entry
-                      new_entry = {
-                        'index' => existing_index,
-                        'type' => tool_call['type'] || 'function'
-                      }
-                      
-                      # Add ID if present
-                      new_entry['id'] = tool_call['id'] if tool_call['id']
-                      
-                      # Add function data if present
-                      if tool_call['function']
-                        new_entry['function'] = {}
-                        new_entry['function']['name'] = tool_call['function']['name'] if tool_call['function']['name']
-                        new_entry['function']['arguments'] = tool_call['function']['arguments'] if tool_call['function']['arguments']
-                      end
-                      
-                      # Add to the list of tool calls
-                      tool_calls << new_entry
-                    end
-                  end
-                  
-                  # Signal that we have a tool call update
-                  yield({ chunk_type: 'tool_call_update', tool_calls: tool_calls }) if block_given?
-                end
-                
-                # Check for finish_reason (signals end of content or tool call)
-                if first_choice['finish_reason']
-                  content_complete = true
-                  finish_reason = first_choice['finish_reason']
-                  
-                  # If we have a non-nil finish reason, the response is complete
-                  yield({ chunk_type: 'finish', finish_reason: finish_reason }) if block_given?
-                end
-              end
-            rescue JSON::ParserError => e
-              Rails.logger.error("Failed to parse streaming chunk: #{e.message}, chunk: #{trimmed_line}")
-            end
-          end
-        end
-      end
-      
-      # Verify response code
-      unless (200..299).cover?(response.status)
-        Rails.logger.error("OpenRouter API streaming error: Status #{response.status}")
-        raise ApiError, "API streaming error: Status #{response.status}"
-      end
-      
-      # Format the final result
-      formatted_tool_calls = format_tools_response_from_openrouter(tool_calls) if tool_calls.any?
-      
-      # Return the complete response object
-      {
-        'content' => accumulated_content,
-        'model' => model_name,
-        'role' => 'assistant',
-        'stop_reason' => content_complete ? 'stop' : nil,
-        'stop_sequence' => nil,
-        'tool_calls' => formatted_tool_calls || [],
-        'usage' => usage_info,
-        'finish_reason' => finish_reason
-      }
-    rescue Faraday::Error => e
-      Rails.logger.error("OpenRouter API streaming error: #{e.message}")
-      raise ApiError, "Network error during streaming: #{e.message}"
     end
 
     # Standardize the Anthropic API response to our internal format
@@ -600,27 +273,7 @@ module LlmToolkit
         end
         
         # Try to fix malformed JSON
-        
-        # Case 1: Arguments string is missing opening brace
-        if !args_str.start_with?('{') && !args_str.end_with?('}')
-          tc['function']['arguments'] = "{#{args_str}}"
-        elsif !args_str.start_with?('{')
-          tc['function']['arguments'] = "{#{args_str}"
-        elsif !args_str.end_with?('}')
-          tc['function']['arguments'] = "#{args_str}}"
-        end
-        
-        # Case 2: Try to detect and complete partial "query" format
-        # Common pattern: "y": "something"
-        if args_str.match(/^y["']?\s*:\s*["']/)
-          tc['function']['arguments'] = "{\"quer#{args_str}}"
-        end
-        
-        # Case 3: Handle unclosed strings
-        # This is hard to fix perfectly, but we can try a simple approach
-        if args_str.count('"') % 2 == 1
-          tc['function']['arguments'] = "#{args_str}\""
-        end
+        tc['function']['arguments'] = fix_malformed_json(args_str)
       end
       
       # PHASE 3: Parse arguments into proper input hash
@@ -636,50 +289,7 @@ module LlmToolkit
         next nil if !has_name && function['arguments'].blank?
         
         # Try to parse the arguments string into a hash
-        input = begin
-          if function['arguments'].is_a?(String)
-            # If the arguments string looks like JSON, parse it
-            if function['arguments'].start_with?('{') && function['arguments'].end_with?('}')
-              JSON.parse(function['arguments'])
-            else
-              # If it doesn't look like JSON but has key-value pattern, try to reconstruct
-              arg_str = function['arguments'].strip
-              if arg_str.include?(':')
-                # Extract key and value based on a simple key:value pattern
-                key, value = arg_str.split(':', 2).map(&:strip)
-                
-                # Remove quotes from key if present
-                key = key.gsub(/["']/, '')
-                
-                # If value looks like a string (has quotes), strip them
-                if value.start_with?('"') && value.end_with?('"')
-                  value = value[1..-2]
-                elsif value.start_with?("'") && value.end_with?("'")
-                  value = value[1..-2]
-                # If it looks like a number, convert it
-                elsif value =~ /^\d+$/
-                  value = value.to_i
-                elsif value =~ /^\d+\.\d+$/
-                  value = value.to_f
-                end
-                
-                {key => value}
-              else
-                # Can't parse it, return it as a raw string
-                {'raw_input' => arg_str}
-              end
-            end
-          else
-            # Not a string, return empty hash
-            {}
-          end
-        rescue JSON::ParserError => e
-          Rails.logger.error("Error parsing tool arguments: #{e.message}")
-          {}
-        rescue => e
-          Rails.logger.error("Unknown error parsing arguments: #{e.message}")
-          {}
-        end
+        input = parse_tool_arguments(function['arguments'])
         
         # Handle special case: vector_search vs text_search
         # If name is missing but we have query parameter, use appropriate search tool
@@ -700,6 +310,81 @@ module LlmToolkit
       Rails.logger.debug("Formatted tool calls: #{formatted_tool_calls.inspect}")
       
       formatted_tool_calls
+    end
+
+    def fix_malformed_json(args_str)
+      # Case 1: Arguments string is missing opening brace
+      if !args_str.start_with?('{') && !args_str.end_with?('}')
+        return "{#{args_str}}"
+      elsif !args_str.start_with?('{')
+        return "{#{args_str}"
+      elsif !args_str.end_with?('}')
+        return "#{args_str}}"
+      end
+      
+      # Case 2: Try to detect and complete partial "query" format
+      # Common pattern: "y": "something"
+      if args_str.match(/^y["']?\s*:\s*["']/)
+        return "{\"quer#{args_str}}"
+      end
+      
+      # Case 3: Handle unclosed strings
+      # This is hard to fix perfectly, but we can try a simple approach
+      if args_str.count('"') % 2 == 1
+        return "#{args_str}\""
+      end
+      
+      args_str
+    end
+
+    def parse_tool_arguments(arguments_str)
+      return {} if arguments_str.blank?
+      
+      begin
+        if arguments_str.is_a?(String)
+          # If the arguments string looks like JSON, parse it
+          if arguments_str.start_with?('{') && arguments_str.end_with?('}')
+            JSON.parse(arguments_str)
+          else
+            # If it doesn't look like JSON but has key-value pattern, try to reconstruct
+            parse_key_value_arguments(arguments_str)
+          end
+        else
+          # Not a string, return empty hash
+          {}
+        end
+      rescue JSON::ParserError => e
+        Rails.logger.error("Error parsing tool arguments: #{e.message}")
+        {}
+      rescue => e
+        Rails.logger.error("Unknown error parsing arguments: #{e.message}")
+        {}
+      end
+    end
+
+    def parse_key_value_arguments(arg_str)
+      arg_str = arg_str.strip
+      return {'raw_input' => arg_str} unless arg_str.include?(':')
+      
+      # Extract key and value based on a simple key:value pattern
+      key, value = arg_str.split(':', 2).map(&:strip)
+      
+      # Remove quotes from key if present
+      key = key.gsub(/["']/, '')
+      
+      # If value looks like a string (has quotes), strip them
+      if value.start_with?('"') && value.end_with?('"')
+        value = value[1..-2]
+      elsif value.start_with?("'") && value.end_with?("'")
+        value = value[1..-2]
+      # If it looks like a number, convert it
+      elsif value =~ /^\d+$/
+        value = value.to_i
+      elsif value =~ /^\d+\.\d+$/
+        value = value.to_f
+      end
+      
+      {key => value}
     end
 
     def format_tools_for_openrouter(tools)
