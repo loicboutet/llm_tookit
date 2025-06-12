@@ -325,6 +325,21 @@ module LlmToolkit
             Rails.logger.error("Cannot update content: current_message is nil")
           end
 
+        when 'error'
+          # SIMPLE ERROR HANDLING - create error message
+          Rails.logger.warn("OpenRouter API error encountered: #{chunk[:error_message]}")
+          
+          if @current_message
+            @current_message.update(
+              content: chunk[:error_message],
+              is_error: true,
+              finish_reason: 'error'
+            )
+          end
+          
+          @content_complete = true
+          @finish_reason = 'error'
+
         when 'tool_call_update'
           # Accumulate tool call updates based on index
           if chunk[:tool_calls].is_a?(Array)

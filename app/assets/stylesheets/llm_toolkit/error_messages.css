@@ -1,0 +1,60 @@
+/* Error message styling for LLM Toolkit */
+
+.llm-message.error-message {
+  background-color: #fef2f2;
+  border-left: 4px solid #ef4444;
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+  color: #991b1b;
+}
+
+.llm-message.error-message::before {
+  content: "⚠️ ";
+  font-size: 1.1em;
+  margin-right: 0.5rem;
+}
+
+.llm-message.error-message .error-content {
+  line-height: 1.6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.llm-message.error-message .error-tip {
+  font-style: italic;
+  margin-top: 0.5rem;
+  opacity: 0.9;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .llm-message.error-message {
+    background-color: #1f2937;
+    border-left-color: #f87171;
+    color: #fca5a5;
+  }
+}
+
+/* Alternative warning style for non-critical errors */
+.llm-message.warning-message {
+  background-color: #fffbeb;
+  border-left: 4px solid #f59e0b;
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+  color: #92400e;
+}
+
+.llm-message.warning-message::before {
+  content: "💡 ";
+  font-size: 1.1em;
+  margin-right: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .llm-message.warning-message {
+    background-color: #1f2937;
+    border-left-color: #fbbf24;
+    color: #fde68a;
+  }
+}

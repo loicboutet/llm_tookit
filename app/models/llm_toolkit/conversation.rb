@@ -32,7 +32,7 @@ module LlmToolkit
     end
 
     # Chat interface - send message and get response
-    # @param message [St^ring] The message to send to the LLM
+    # @param message [String] The message to send to the LLM
     # @param llm_model [LlmToolkit::LlmModel, nil] An optional specific model to use
     # @param tools [Array<Class>, nil] Optional tools to use for this interaction
     # @param async [Boolean] Whether to process the request asynchronously
@@ -185,20 +185,17 @@ module LlmToolkit
     #
     # @return [Array<Hash>] Formatted messages for the specified provider type
     def history(llm_model: nil)
-      # raise ArgumentError, "Invalid role" unless [:coder, :reviewer, :planner].include?(role) # Role removed
       target_llm_model = llm_model || get_default_llm_model
       provider_type = target_llm_model.llm_provider.provider_type
       raise ArgumentError, "Invalid provider type derived from model" unless ["anthropic", "openrouter"].include?(provider_type)
 
-      # role = :coder if role == :planner # Role removed
       history_messages = []
 
+      # SIMPLE CHANGE: Filter out error messages from the conversation history
       messages.non_error.order(:created_at).each do |message|
         # Base structure for the message
         llm_message = { role: message.role }
         tool_uses = message.tool_uses
-        # Use the provider type derived from the target_llm_model for formatting
-        # current_provider_type = provider_type # Removed, use provider_type directly
 
         # --- Content Formatting ---
         if message.user_message?
@@ -207,7 +204,7 @@ module LlmToolkit
           # Always add text part first
           content_parts << { type: "text", text: message.content.presence || "" }
 
-          if message.attachments.attached? && provider_type == 'openrouter' # Use provider_type directly
+          if message.attachments.attached? && provider_type == 'openrouter'
             message.attachments.each do |attachment|
               begin
                 # Download blob data safely
@@ -228,13 +225,9 @@ module LlmToolkit
                   }
                 else
                   Rails.logger.warn "Unsupported attachment type for LLM: #{attachment.content_type}, filename: #{attachment.filename}"
-                  # Optionally add a text note about the unsupported file
-                  # content_parts << { type: "text", text: "[Unsupported attachment: #{attachment.filename}]" }
                 end
               rescue => e
                 Rails.logger.error "Error processing attachment #{attachment.id} for LLM: #{e.message}"
-                # Optionally add a text note about the error
-                # content_parts << { type: "text", text: "[Error processing attachment: #{attachment.filename}]" }
               end
             end
           end
@@ -254,11 +247,9 @@ module LlmToolkit
         end
         # --- End Content Formatting ---
 
-
         # --- Tool Handling ---
-        # Role check removed - assume tools are always processed based on provider type
         if tool_uses.any?
-          case provider_type # Use provider_type directly
+          case provider_type
           when "anthropic"
             # Anthropic format: Tool uses and results are part of the message content array
             history_messages += format_anthropic_message(llm_message, tool_uses)
@@ -279,10 +270,10 @@ module LlmToolkit
               end
             elsif llm_message[:role] == 'user'
               # User content formatting depends on provider
-              if provider_type == 'openrouter' && llm_message[:content].is_a?(String) # Use provider_type directly
+              if provider_type == 'openrouter' && llm_message[:content].is_a?(String)
                  # OpenRouter expects user content to be an array even if just text
                 llm_message[:content] = [{ type: "text", text: llm_message[:content] }]
-              elsif provider_type == 'anthropic' && llm_message[:content].is_a?(Array) # Use provider_type directly
+              elsif provider_type == 'anthropic' && llm_message[:content].is_a?(Array)
                  # Anthropic expects user content to be a string unless using complex content
                  # For simplicity here, let's assume basic text for now if it was an array
                  text_part = llm_message[:content].find { |part| part[:type] == 'text' }
@@ -296,7 +287,7 @@ module LlmToolkit
       end
 
       # Only add cache control headers for Anthropic
-      if provider_type == "anthropic" # Use provider_type defined outside the loop
+      if provider_type == "anthropic"
         add_cache_control(history_messages)
       end
 
@@ -304,7 +295,7 @@ module LlmToolkit
       return history_messages.reject do |msg|
         is_empty_non_user = msg[:role] != 'user' && msg[:content].blank? && msg[:tool_calls].blank?
         # Adjust empty user message check based on provider
-        is_empty_user = if provider_type == "anthropic" # Use provider_type defined outside the loop
+        is_empty_user = if provider_type == "anthropic"
                           msg[:role] == 'user' && msg[:content].blank?
                         else # openrouter
                           msg[:role] == 'user' && msg[:content].is_a?(Array) && msg[:content].all? { |p| p[:type] == 'text' && p[:text].blank? }
@@ -343,10 +334,6 @@ module LlmToolkit
     def get_default_tools
       conversable.class.default_tools
     end
-
-    # Message formatting methods (Keep format_anthropic_message, format_openrouter_message, etc.)
-    # Remove format_content_with_images as it's integrated above
-    # def format_content_with_images(message, content) ... end # REMOVED
 
     def format_anthropic_message(message_content, tool_uses)
       # Ensure message_content[:content] is an array for Anthropic

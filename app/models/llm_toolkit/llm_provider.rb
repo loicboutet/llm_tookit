@@ -108,8 +108,8 @@ module LlmToolkit
         Rails.logger.info("Tool #{idx+1}: #{tool[:name]} - Desc: #{tool[:description] || 'MISSING!'}")
       end
 
-      # Use the specific model name passed in
-      model_name = llm_model.name
+      # Use the model_id for API calls, not the display name
+      model_name = llm_model.model_id.presence || llm_model.name
       max_tokens = settings&.dig('max_tokens').to_i || LlmToolkit.config.default_max_tokens
       Rails.logger.info("Using model: #{model_name}")
       Rails.logger.info("Max tokens : #{max_tokens}")
@@ -185,8 +185,8 @@ module LlmToolkit
         { role: 'system', content: system_message_content }
       ] + fixed_conversation_history
 
-      # Use the specific model name passed in
-      model_name = llm_model.name
+      # Use the model_id for API calls, not the display name
+      model_name = llm_model.model_id.presence || llm_model.name
       max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
       Rails.logger.info("Using model: #{model_name}")
       Rails.logger.info("Max tokens : #{max_tokens}")
@@ -268,8 +268,8 @@ module LlmToolkit
         { role: 'system', content: system_message_content }
       ] + fixed_conversation_history
 
-      # Use the specific model name passed in
-      model_name = llm_model.name
+      # Use the model_id for API calls, not the display name
+      model_name = llm_model.model_id.presence || llm_model.name
  #     max_tokens = settings&.dig('max_tokens') || LlmToolkit.config.default_max_tokens
       Rails.logger.info("Using model: #{model_name}")
  #     Rails.logger.info("Max tokens : #{max_tokens}")
@@ -334,6 +334,27 @@ module LlmToolkit
               # Parse the chunk JSON
               json_data = JSON.parse(json_str)
               Rails.logger.info("OpenRouter chunk : #{json_data}")
+
+              # Check if this chunk contains an error - SIMPLE ERROR HANDLING
+              if json_data['error'].present?
+                error_message = json_data['error']['message']
+                
+                # Create user-friendly message for common errors
+                friendly_message = case error_message
+                when /no endpoints found that support tool use/i
+                  "Le modèle sélectionné ne prend pas en charge les outils avancés."
+                when /rate limit/i, /too many requests/i
+                  "Le service est temporairement surchargé. Veuillez réessayer dans quelques instants."
+                when /model .* not found/i
+                  "Le modèle demandé n'est pas disponible. Essayez de sélectionner un autre modèle."
+                else
+                  "Une erreur s'est produite: #{error_message}"
+                end
+                
+                # Yield an error chunk
+                yield({ chunk_type: 'error', error_message: friendly_message }) if block_given?
+                next
+              end
 
               # Record model name if not yet set
               model_name ||= json_data['model']
