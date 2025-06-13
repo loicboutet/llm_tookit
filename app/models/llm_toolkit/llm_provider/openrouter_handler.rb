@@ -164,12 +164,15 @@ module LlmToolkit
         end
 
         # Initialize variables to track the streaming response
-        accumulated_content = ""
-        tool_calls = []
-        model_name = nil
-        usage_info = nil
-        content_complete = false
-        finish_reason = nil
+        streaming_state = {
+          accumulated_content: "",
+          tool_calls: [],
+          model_name: nil,
+          usage_info: nil,
+          content_complete: false,
+          finish_reason: nil,
+          json_buffer: ""
+        }
 
         response = client.post('chat/completions') do |req|
           req.headers['Content-Type'] = 'application/json'
@@ -177,30 +180,30 @@ module LlmToolkit
           req.headers['X-Title'] = 'Development Environment'
           req.body = request_body.to_json
           req.options.on_data = proc do |chunk, size, env|
-            # Handle streaming response processing (keeping existing logic)
-            handle_streaming_chunk(chunk, accumulated_content, tool_calls, model_name, usage_info, content_complete, finish_reason, &block)
+            # Handle streaming response processing with improved buffering
+            handle_streaming_chunk_with_buffering(chunk, streaming_state, &block)
           end
         end
         
-        # Verify response code and return final result (keeping existing logic)
+        # Verify response code and return final result
         unless (200..299).cover?(response.status)
           Rails.logger.error("OpenRouter API streaming error: Status #{response.status}")
           raise ApiError, "API streaming error: Status #{response.status}"
         end
         
         # Format the final result
-        formatted_tool_calls = format_tools_response_from_openrouter(tool_calls) if tool_calls.any?
+        formatted_tool_calls = format_tools_response_from_openrouter(streaming_state[:tool_calls]) if streaming_state[:tool_calls].any?
         
         # Return the complete response object
         {
-          'content' => accumulated_content,
-          'model' => model_name,
+          'content' => streaming_state[:accumulated_content],
+          'model' => streaming_state[:model_name],
           'role' => 'assistant',
-          'stop_reason' => content_complete ? 'stop' : nil,
+          'stop_reason' => streaming_state[:content_complete] ? 'stop' : nil,
           'stop_sequence' => nil,
           'tool_calls' => formatted_tool_calls || [],
-          'usage' => usage_info,
-          'finish_reason' => finish_reason
+          'usage' => streaming_state[:usage_info],
+          'finish_reason' => streaming_state[:finish_reason]
         }
       rescue Faraday::Error => e
         Rails.logger.error("OpenRouter API streaming error: #{e.message}")
@@ -230,78 +233,113 @@ module LlmToolkit
         sanitized
       end
       
-      # Handle streaming chunk processing (extracted from existing method)
-      def handle_streaming_chunk(chunk, accumulated_content, tool_calls, model_name, usage_info, content_complete, finish_reason, &block)
+      # Improved chunk handling with proper JSON buffering
+      def handle_streaming_chunk_with_buffering(chunk, streaming_state, &block)
         # Force chunk encoding to UTF-8 to prevent Encoding::CompatibilityError
         chunk.force_encoding('UTF-8')
         return if chunk.strip.empty?
         
-        # Remove 'data: ' prefix from each line and skip comment lines
-        chunk.each_line do |line|
-          # Ensure line is also UTF-8, though force_encoding on chunk should handle this
-          trimmed_line = line.strip 
-          next if trimmed_line.empty? || trimmed_line.start_with?(':')
-          
-          # Check for [DONE] marker
-          if trimmed_line == 'data: [DONE]'
-            content_complete = true
-            next
-          end
-          
-          # Extract the JSON part from the SSE line
-          json_str = trimmed_line.sub(/^data: /, '')
-          
-          begin
-            # Parse the chunk JSON
-            json_data = JSON.parse(json_str)
-            Rails.logger.info("OpenRouter chunk : #{json_data}")
-
-            # Check if this chunk contains an error - SIMPLE ERROR HANDLING
-            if json_data['error'].present?
-              error_message = json_data['error']['message']
-              
-              # Create user-friendly message for common errors
-              friendly_message = case error_message
-              when /no endpoints found that support tool use/i
-                "Le modèle sélectionné ne prend pas en charge les outils avancés."
-              when /rate limit/i, /too many requests/i
-                "Le service est temporairement surchargé. Veuillez réessayer dans quelques instants."
-              when /model .* not found/i
-                "Le modèle demandé n'est pas disponible. Essayez de sélectionner un autre modèle."
-              else
-                "Une erreur s'est produite: #{error_message}"
-              end
-              
-              # Yield an error chunk
-              yield({ chunk_type: 'error', error_message: friendly_message }) if block_given?
-              next
-            end
-
-            # Process the streaming response (keeping existing logic but simplified)
-            process_streaming_response_chunk(json_data, accumulated_content, tool_calls, model_name, usage_info, content_complete, finish_reason, &block)
-            
-          rescue JSON::ParserError => e
-            Rails.logger.error("Failed to parse streaming chunk: #{e.message}, chunk: #{trimmed_line}")
-          end
+        # Add the new chunk to our buffer
+        streaming_state[:json_buffer] << chunk
+        
+        # Process complete lines from the buffer
+        while streaming_state[:json_buffer].include?("\n")
+          line, streaming_state[:json_buffer] = streaming_state[:json_buffer].split("\n", 2)
+          process_sse_line(line.strip, streaming_state, &block)
         end
       end
       
+      # Process a single Server-Sent Events line
+      def process_sse_line(line, streaming_state, &block)
+        return if line.empty? || line.start_with?(':')
+        
+        # Check for [DONE] marker
+        if line == 'data: [DONE]'
+          streaming_state[:content_complete] = true
+          return
+        end
+        
+        # Skip if this isn't a data line
+        return unless line.start_with?('data: ')
+        
+        # Extract the JSON part from the SSE line
+        json_str = line.sub(/^data: /, '')
+        
+        begin
+          # Parse the chunk JSON
+          json_data = JSON.parse(json_str)
+          Rails.logger.info("OpenRouter chunk : #{json_data}")
+
+          # Check if this chunk contains an error - SIMPLE ERROR HANDLING
+          if json_data['error'].present?
+            error_message = json_data['error']['message']
+            
+            # Create user-friendly message for common errors
+            friendly_message = case error_message
+            when /no endpoints found that support tool use/i
+              "Le modèle sélectionné ne prend pas en charge les outils avancés."
+            when /rate limit/i, /too many requests/i
+              "Le service est temporairement surchargé. Veuillez réessayer dans quelques instants."
+            when /model .* not found/i
+              "Le modèle demandé n'est pas disponible. Essayez de sélectionner un autre modèle."
+            else
+              "Une erreur s'est produite: #{error_message}"
+            end
+            
+            # Yield an error chunk
+            yield({ chunk_type: 'error', error_message: friendly_message }) if block_given?
+            return
+          end
+
+          # Process the streaming response
+          process_streaming_response_chunk(json_data, streaming_state, &block)
+          
+        rescue JSON::ParserError => e
+          Rails.logger.error("Failed to parse streaming chunk: #{e.message}, chunk: #{json_str}")
+          # Don't re-raise, just log and continue - this is common with incomplete chunks
+        end
+      end
+      
+      # Legacy method for backward compatibility - delegates to new buffering method
+      def handle_streaming_chunk(chunk, accumulated_content, tool_calls, model_name, usage_info, content_complete, finish_reason, &block)
+        # Create a temporary streaming state for this method
+        streaming_state = {
+          accumulated_content: accumulated_content,
+          tool_calls: tool_calls,
+          model_name: model_name,
+          usage_info: usage_info,
+          content_complete: content_complete,
+          finish_reason: finish_reason,
+          json_buffer: ""
+        }
+        
+        handle_streaming_chunk_with_buffering(chunk, streaming_state, &block)
+        
+        # Update the original variables (this is a bit hacky but maintains backward compatibility)
+        accumulated_content.replace(streaming_state[:accumulated_content])
+        tool_calls.replace(streaming_state[:tool_calls])
+        model_name = streaming_state[:model_name]
+        usage_info = streaming_state[:usage_info]
+        content_complete = streaming_state[:content_complete]
+        finish_reason = streaming_state[:finish_reason]
+      end
+      
       # Process individual streaming response chunks
-      def process_streaming_response_chunk(json_data, accumulated_content, tool_calls, model_name, usage_info, content_complete, finish_reason, &block)
+      def process_streaming_response_chunk(json_data, streaming_state, &block)
         # Record model name if not yet set
-        model_name ||= json_data['model']
+        streaming_state[:model_name] ||= json_data['model']
         
         # Check if this is a tool call chunk
         first_choice = json_data['choices']&.first
         return unless first_choice
         
         # Record usage if present (typically in the final chunk)
-        usage_info = json_data['usage'] if json_data['usage']
+        streaming_state[:usage_info] = json_data['usage'] if json_data['usage']
         
         # Check for delta for text content
         if first_choice['delta'] && first_choice['delta']['content']
           new_content = first_choice['delta']['content']
-          accumulated_content += new_content
+          streaming_state[:accumulated_content] += new_content
           
           # Pass the new content to the block
           yield({ chunk_type: 'content', content: new_content }) if block_given?
@@ -312,16 +350,16 @@ module LlmToolkit
           new_tool_calls = first_choice['delta']['tool_calls']
           
           # Process the tool call (keeping existing complex logic)
-          process_tool_calls(new_tool_calls, tool_calls, &block)
+          process_tool_calls(new_tool_calls, streaming_state[:tool_calls], &block)
         end
         
         # Check for finish_reason (signals end of content or tool call)
         if first_choice['finish_reason']
-          content_complete = true
-          finish_reason = first_choice['finish_reason']
+          streaming_state[:content_complete] = true
+          streaming_state[:finish_reason] = first_choice['finish_reason']
           
           # If we have a non-nil finish reason, the response is complete
-          yield({ chunk_type: 'finish', finish_reason: finish_reason }) if block_given?
+          yield({ chunk_type: 'finish', finish_reason: streaming_state[:finish_reason] }) if block_given?
         end
       end
       
